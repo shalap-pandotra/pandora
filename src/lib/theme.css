@@ -1,0 +1,52 @@
+:root {
+  --zen-bg: #F0F0EC;
+  --zen-panel: #FFFFFF;
+  --zen-border: #DED9CE;
+  --zen-ink: #1C1B18;
+  --zen-text-secondary: #3B3934;
+  --zen-text-muted: #736F65;
+  --zen-text-faint: #8D8A80;
+  --zen-count: #ACA89C;
+  --zen-pill-bg: #F1EFE9;
+  --zen-red: #E4022B;
+  --zen-red-dark: #A5011F;
+
+  --zen-font-serif: 'Fraunces', serif;
+  --zen-font-sans: 'Public Sans', sans-serif;
+}
+
+body {
+  margin: 0;
+  background: var(--zen-bg);
+  font-family: var(--zen-font-sans);
+  color: var(--zen-ink);
+}
+
+::selection { background: #F7C7CE; }
+
+.zen-btn {
+  font-family: var(--zen-font-sans);
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: none;
+  color: inherit;
+}
+.zen-btn:focus-visible, .zen-input:focus-visible, .zen-card:focus-visible {
+  outline: 2px solid var(--zen-red);
+  outline-offset: 2px;
+}
+a { color: inherit; text-decoration: none; }
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, var(--zen-scrollbar-alpha, 0));
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+}
