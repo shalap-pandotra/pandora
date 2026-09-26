@@ -1,7 +1,7 @@
 <script>
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 
-let { book } = $props();
+let { book, libraryLoaded} = $props();
 </script>
 
 <div class="preview">
@@ -49,7 +49,13 @@ let { book } = $props();
     </div>
 
   {:else}
-    <div class="empty">Select a book to preview it here.</div>
+  <div class="empty">
+    {#if libraryLoaded}
+      Select a book to preview it here.
+    {:else}
+      Hint: Press Ctrl+O to add your existing Calibre Library
+    {/if}
+  </div>
   {/if}
 </div>
 

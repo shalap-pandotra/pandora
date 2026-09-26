@@ -7,17 +7,24 @@ import { onMount } from 'svelte';
 import PreviewPanel from '../lib/PreviewPanel.svelte';
 import BookList from '../lib/BookList.svelte';
 import StatusBar from '../lib/StatusBar.svelte';
+import { open } from '@tauri-apps/plugin-dialog';
 
 let libraryPath = $state('');
 let libraryLoaded = $state(false);
 let books = $state([]);
 let selectedBook = $state(null);
 let searchTerm = $state('');
-let currentFilter = $state({ author_id: null, series_id: null, tag_id: null, search: null });
+let currentFilter = $state({ author_id: null, series_id: null, tag_id: null, search: null, custom_column_id: null, custom_value_id: null });
 
 let gridHeight = $state(224);
 let dragging = false;
 let mainColEl = $state();
+
+
+let cachedRect = null;
+let pendingHeight = null;
+let rafPending = false;
+let dragOffset = 0;
 
 onMount(() => {
   const state = new WeakMap(); // el -> { current, target, rafId, timer }
@@ -59,8 +66,24 @@ onMount(() => {
 
   document.addEventListener('scroll', handleScroll, true);
 
+  function handleKeydown(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'o') {
+      e.preventDefault();
+      pickLibraryFolder();
+    }
+  }
+  window.addEventListener('keydown', handleKeydown);
+
+  invoke('load_last_library_path').then((savedPath) => {
+    if (savedPath) {
+      libraryPath = savedPath;
+      openLibrary();
+    }
+  });
+
   return () => {
     document.removeEventListener('scroll', handleScroll, true);
+    window.removeEventListener('keydown', handleKeydown);
   };
 });
 
@@ -81,15 +104,9 @@ $effect(() => {
   return () => resizeObserver.disconnect();
 });
 
-async function openLibrary() {
-  await invoke('set_library_path', { path: libraryPath });
-  libraryLoaded = true;
-  await refreshBooks();
-}
-
 async function refreshBooks() {
   books = await invoke('get_books_filtered', { filter: currentFilter });
-  if (!selectedBook && books.length) selectedBook = books[0];
+  selectedBook = books.length ? books[0] : null;
 }
 
 async function handleFilterChange(filter) {
@@ -110,72 +127,100 @@ function handleSelectBook(book) {
   selectedBook = book;
 }
 
+
 function startDrag(e) {
   dragging = true;
   e.target.setPointerCapture(e.pointerId);
   document.body.style.cursor = 'row-resize';
   document.body.style.userSelect = 'none';
+  cachedRect = mainColEl.getBoundingClientRect();
+
+  // Preserve the gap between the raw cursor-to-height mapping and the
+  // divider's actual current position, so grabbing it doesn't snap it
+  // to the cursor.
+  const rawFromBottom = cachedRect.bottom - e.clientY;
+  dragOffset = gridHeight - rawFromBottom;
+
   window.addEventListener('pointermove', onDrag);
   window.addEventListener('pointerup', stopDrag);
 }
+
 function onDrag(e) {
-  if (!dragging || !mainColEl) return;
-  const rect = mainColEl.getBoundingClientRect();
-  const fromBottom = rect.bottom - e.clientY;
+  if (!dragging || !cachedRect) return;
+  const fromBottom = cachedRect.bottom - e.clientY + dragOffset;
   const gridMin = 120;
   const previewMin = 280;
-  const max = rect.height - previewMin;
-  gridHeight = Math.min(max, Math.max(gridMin, fromBottom));
+  const max = cachedRect.height - previewMin;
+  pendingHeight = Math.min(max, Math.max(gridMin, fromBottom));
+
+  if (!rafPending) {
+    rafPending = true;
+    requestAnimationFrame(() => {
+      gridHeight = pendingHeight;
+      rafPending = false;
+    });
+  }
 }
+
 function stopDrag() {
   dragging = false;
+  cachedRect = null;
+  dragOffset = 0;
   document.body.style.cursor = '';
   document.body.style.userSelect = '';
   window.removeEventListener('pointermove', onDrag);
   window.removeEventListener('pointerup', stopDrag);
 }
+
 function handleResizerKeydown(e) {
   const step = 20;
   if (e.key === 'ArrowDown') { gridHeight = Math.max(120, gridHeight - step); }
   if (e.key === 'ArrowUp') { gridHeight = Math.min(mainColEl.getBoundingClientRect().height - 280, gridHeight + step); }
 }
+
+async function pickLibraryFolder() {
+  const selected = await open({ directory: true, multiple: false });
+  if (selected) {
+    libraryPath = selected;
+    await openLibrary();
+  }
+}
+
+async function openLibrary() {
+  await invoke('set_library_path', { path: libraryPath });
+  await invoke('save_last_library_path', { path: libraryPath });
+  libraryLoaded = true;
+  await refreshBooks();
+}
 </script>
 
-{#if !libraryLoaded}
-  <div class="opener">
-    <input bind:value={libraryPath} placeholder="/path/to/calibre-library" />
-    <button onclick={openLibrary}>Open</button>
-  </div>
-{:else}
-  <div class="frame">
-    <TopBar />
-    <div class="body-row">
-      <Sidebar onFilterChange={handleFilterChange} onReset={handleReset} />
-      <div class="main-col" bind:this={mainColEl}>
-        <PreviewPanel book={selectedBook} />
-        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-        <div
-          class="resizer"
-          role="separator"
-          aria-orientation="horizontal"
-          aria-label="Resize book grid"
-          aria-valuenow={gridHeight}
-          aria-valuemin={120}
-          aria-valuemax={mainColEl ? mainColEl.getBoundingClientRect().height - 280 : 999}
-          tabindex="0"
-          onpointerdown={startDrag}
-          onkeydown={handleResizerKeydown}
-        ></div>
-        <BookList {books} bind:value={searchTerm} onSearch={handleSearch} onSelectBook={handleSelectBook} height={gridHeight} />
-      </div>
+<div class="frame">
+  <TopBar />
+  <div class="body-row">
+    <Sidebar onFilterChange={handleFilterChange} onReset={handleReset} libraryLoaded={libraryLoaded} />
+    <div class="main-col" bind:this={mainColEl}>
+      <PreviewPanel book={selectedBook} libraryLoaded={libraryLoaded} />
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <div
+        class="resizer"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize book grid"
+        aria-valuenow={gridHeight}
+        aria-valuemin={120}
+        aria-valuemax={mainColEl ? mainColEl.getBoundingClientRect().height - 280 : 999}
+        tabindex="0"
+        onpointerdown={startDrag}
+        onkeydown={handleResizerKeydown}
+      ></div>
+      <BookList {books} bind:value={searchTerm} onSearch={handleSearch} onSelectBook={handleSelectBook} height={gridHeight} />
     </div>
-    <StatusBar libraryName={libraryPath.split(/[\\/]/).pop()} bookCount={books.length} />
   </div>
-{/if}
+  <StatusBar libraryName={libraryPath.split(/[\\/]/).pop()} bookCount={books.length} />
+</div>
 
 <style>
-.opener { display: flex; gap: 8px; padding: 40px; }
 .frame {
   width: 100vw; height: 100vh; box-sizing: border-box;
   background: var(--zen-bg);

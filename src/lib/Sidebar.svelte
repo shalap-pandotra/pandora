@@ -2,21 +2,92 @@
 import { invoke } from '@tauri-apps/api/core';
 import { onMount } from 'svelte';
 
-let { onFilterChange, onReset } = $props();
-
+let { onFilterChange, onReset, libraryLoaded } = $props();
 let authors = $state([]);
 let series = $state([]);
 let tags = $state([]);
-
 let activeAuthor = $state(null);
 let activeSeries = $state(null);
 let activeTag = $state(null);
+let multiTextColumns = $state([]);
+let expandedNodes = $state(new Set());
+let activeCustomValue = $state(null); // { columnId, valueId } or null
+let authorsExpanded = $state(true);
+let seriesExpanded = $state(true);
+let tagsExpanded = $state(true);
+let collapsedColumns = $state(new Set());
 
-onMount(async () => {
-  authors = await invoke('get_authors');
-  series = await invoke('get_series');
-  tags = await invoke('get_tags');
+$effect(() => {
+  if (!libraryLoaded) return;
+  invoke('get_authors').then((r) => authors = r);
+  invoke('get_series').then((r) => series = r);
+  invoke('get_tags').then((r) => tags = r);
+  invoke('get_multi_text_columns').then((r) => (multiTextColumns = r));
 });
+
+function buildTree(values) {
+  const root = [];
+  const nodeMap = new Map(); // path string -> node
+
+  for (const v of values) {
+    const parts = v.value.split('.');
+    let currentPath = '';
+    let parentChildren = root;
+
+    for (let i = 0; i < parts.length; i++) {
+      currentPath = currentPath ? `${currentPath}.${parts[i]}` : parts[i];
+      let node = nodeMap.get(currentPath);
+
+      if (!node) {
+        const isLeaf = i === parts.length - 1;
+        node = {
+          path: currentPath,
+          label: parts[i],
+          children: [],
+          id: isLeaf ? v.id : null,
+          count: isLeaf ? v.count : 0
+        };
+        nodeMap.set(currentPath, node);
+        parentChildren.push(node);
+      }
+      parentChildren = node.children;
+    }
+  }
+
+  return root;
+}
+
+function toggleNode(path) {
+  const next = new Set(expandedNodes);
+  if (next.has(path)) next.delete(path);
+    else next.add(path);
+  expandedNodes = next;
+}
+
+function pruneEmptyBranches(nodes) {
+  const result = [];
+
+  for (const node of nodes) {
+    const prunedChildren = pruneEmptyBranches(node.children);
+    const hasOwnEntry = node.id !== null;
+    const hasSurvivingDescendant = prunedChildren.length > 0;
+
+    if (hasOwnEntry || hasSurvivingDescendant) {
+      result.push({ ...node, children: prunedChildren });
+    }
+  }
+
+  return result;
+}
+
+function selectCustomValue(columnId, valueId) {
+  const isSame = activeCustomValue?.columnId === columnId && activeCustomValue?.valueId === valueId;
+  activeCustomValue = isSame ? null : { columnId, valueId };
+  onFilterChange?.({
+    custom_column_id: isSame ? null : columnId,
+    custom_value_id: isSame ? null : valueId
+  });
+}
 
 function toggleAuthor(id) {
   activeAuthor = activeAuthor === id ? null : id;
@@ -34,6 +105,7 @@ function reset() {
   activeAuthor = null;
   activeSeries = null;
   activeTag = null;
+  activeCustomValue = null;
   onReset?.();
   emitFilter();
 }
@@ -42,8 +114,17 @@ function emitFilter() {
     author_id: activeAuthor,
     series_id: activeSeries,
     tag_id: activeTag,
-    search: null
+    search: null,
+    custom_column_id: activeCustomValue?.columnId ?? null,
+    custom_value_id: activeCustomValue?.valueId ?? null
   });
+}
+
+function toggleColumnCollapsed(colId) {
+  const next = new Set(collapsedColumns);
+  if (next.has(colId)) next.delete(colId);
+  else next.add(colId);
+  collapsedColumns = next;
 }
 
 const tools = [
@@ -83,51 +164,126 @@ const tools = [
   </div>
 
   <div>
-    <div class="section-title">Authors</div>
-    <div class="stack">
-      {#each authors as row (row.id)}
-        <button
-          class="zen-btn filter-row"
-          class:active={activeAuthor === row.id}
-          onclick={() => toggleAuthor(row.id)}
-        >
-          <span>{row.name}</span>
-          <span class="filter-count">{row.count}</span>
-        </button>
-      {/each}
-    </div>
+    <button class="zen-btn section-header" onclick={() => authorsExpanded = !authorsExpanded}>
+      <span class="section-title" style="margin:0;">Authors</span>
+      <span class="section-chevron">{authorsExpanded ? '−' : '+'}</span>
+    </button>
+    {#if authorsExpanded}
+      <div class="stack">
+        {#each authors as row (row.id)}
+          <button
+            class="zen-btn filter-row"
+            class:active={activeAuthor === row.id}
+            onclick={() => toggleAuthor(row.id)}
+          >
+            <span>{row.name}</span>
+            <span class="filter-count">{row.count}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
   </div>
 
   <div>
-    <div class="section-title">Series</div>
-    <div class="stack">
-      {#each series as row (row.id)}
-        <button
-          class="zen-btn filter-row"
-          class:active={activeSeries === row.id}
-          onclick={() => toggleSeries(row.id)}
-        >
-          <span>{row.name}</span>
-          <span class="filter-count">{row.count}</span>
-        </button>
-      {/each}
-    </div>
+    <button class="zen-btn section-header" onclick={() => seriesExpanded = !seriesExpanded}>
+      <span class="section-title" style="margin:0;">Series</span>
+      <span class="section-chevron">{seriesExpanded ? '−' : '+'}</span>
+    </button>
+    {#if seriesExpanded}
+      <div class="stack">
+        {#each series as row (row.id)}
+          <button
+            class="zen-btn filter-row"
+            class:active={activeSeries === row.id}
+            onclick={() => toggleSeries(row.id)}
+          >
+            <span>{row.name}</span>
+            <span class="filter-count">{row.count}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
   </div>
 
   <div>
-    <div class="section-title">Tags</div>
-    <div class="tag-row">
-      {#each tags as row (row.id)}
-        <button
-          class="zen-btn tag-pill"
-          class:active={activeTag === row.id}
-          onclick={() => toggleTag(row.id)}
-        >
-          {row.name}
-        </button>
-      {/each}
-    </div>
+    <button class="zen-btn section-header" onclick={() => tagsExpanded = !tagsExpanded}>
+      <span class="section-title" style="margin:0;">Tags</span>
+      <span class="section-chevron">{tagsExpanded ? '−' : '+'}</span>
+    </button>
+    {#if tagsExpanded}
+      <div class="tag-row">
+        {#each tags as row (row.id)}
+          <button
+            class="zen-btn tag-pill"
+            class:active={activeTag === row.id}
+            onclick={() => toggleTag(row.id)}
+          >
+            {row.name}
+          </button>
+        {/each}
+      </div>
+    {/if}
   </div>
+
+{#each multiTextColumns as col (col.id)}
+  <div>
+    <button class="zen-btn section-header" onclick={() => toggleColumnCollapsed(col.id)}>
+      <span class="section-title" style="margin:0;">{col.name}</span>
+      <span class="section-chevron">{collapsedColumns.has(col.id) ? '+' : '−'}</span>
+    </button>
+    {#if !collapsedColumns.has(col.id)}
+      <div class="stack">
+        {#each pruneEmptyBranches(buildTree(col.values)) as node}
+          {@render treeNode(node, col.id)}
+        {/each}
+      </div>
+    {/if}
+  </div>
+{/each}
+
+  {#snippet treeNode(node, columnId)}
+    <div class="tree-row">
+      {#if node.children.length}
+        <button class="zen-btn tree-toggle" onclick={() => toggleNode(node.path)}>
+          {expandedNodes.has(node.path) ? '−' : '+'}
+        </button>
+      {:else}
+        <span class="tree-toggle-spacer"></span>
+      {/if}
+
+      {#if node.id !== null}
+        <button
+          class="zen-btn filter-row"
+          class:active={activeCustomValue?.columnId === columnId && activeCustomValue?.valueId === node.id}
+          onclick={() => {
+            selectCustomValue(columnId, node.id);
+            if (node.children.length && !expandedNodes.has(node.path)) {
+              toggleNode(node.path);
+            }
+          }}
+        >
+          <span>{node.label}</span>
+          <span class="filter-count">{node.count}</span>
+        </button>
+      {:else}
+        <button
+          class="zen-btn tree-label-only"
+          class:active={node.children.length && expandedNodes.has(node.path)}
+          onclick={() => node.children.length && toggleNode(node.path)}
+        >
+          {node.label}
+        </button>
+      {/if}
+    </div>
+
+    {#if node.children.length && expandedNodes.has(node.path)}
+      <div class="tree-children">
+        {#each node.children as child}
+          {@render treeNode(child, columnId)}
+        {/each}
+      </div>
+    {/if}
+  {/snippet}
 
 </div>
 
@@ -141,7 +297,7 @@ const tools = [
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 16px;
 }
 .stack { display: flex; flex-direction: column; gap: 2px; }
 .eyebrow {
@@ -162,7 +318,23 @@ const tools = [
   text-align: left;
   width: 100%;
 }
-.divider { height: 1px; background: var(--zen-border); margin: -4px 0; }
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  margin-bottom: 6px;
+}
+.section-chevron {
+  font-size: 13px;
+  color: var(--zen-text-faint);
+}
+.divider {
+  height: 1px;
+  background: var(--zen-border);
+  margin: 0;
+  flex-shrink: 0;
+}
 .filter-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .reset-link { font-size: 12px; color: var(--zen-red); font-weight: 500; }
 .section-title { font-size: 12px; font-weight: 600; color: var(--zen-ink); margin-bottom: 6px; }
@@ -171,13 +343,16 @@ const tools = [
   align-items: center;
   justify-content: space-between;
   padding: 6px 8px;
-  border-radius: 6px;
+  border-radius: 2px;
   font-size: 13px;
   text-align: left;
   width: 100%;
 }
+.filter-row:hover {
+  background: #F7C7CE;
+}
 .filter-row.active {
-  background: var(--zen-pill-bg);
+  background: #F7C7CE;
   color: var(--zen-red);
   font-weight: 500;
 }
@@ -195,5 +370,79 @@ const tools = [
   background: var(--zen-red);
   border-color: var(--zen-red);
   color: white;
+}
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.tree-toggle {
+  width: 18px; height: 18px; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; color: var(--zen-text-faint);
+}
+.tree-toggle-spacer { width: 18px; flex: none; }
+.tree-label-only {
+  font-size: 13px; padding: 6px 8px; color: var(--zen-text-faint);
+  font-weight: 500;
+}
+.tree-children {
+  margin-left: 9px;
+  padding-left: 9px;
+}
+.tree-children .tree-row {
+  position: relative;
+}
+.tree-children .tree-row::before {
+  content: '';
+  position: absolute;
+  left: -9px;
+  top: 0;
+  bottom: 50%;
+  width: 1px;
+  background: var(--zen-text-faint);
+}
+.tree-children .tree-row::after {
+  content: '';
+  position: absolute;
+  left: -9px;
+  top: 50%;
+  bottom: 0;
+  width: 1px;
+  background: var(--zen-text-faint);
+}
+.tree-children .tree-row:last-child::after {
+  display: none;
+}
+.tree-children .tree-row .tree-toggle,
+.tree-children .tree-row .tree-toggle-spacer {
+  position: relative;
+}
+.tree-children .tree-row .tree-toggle::before,
+.tree-children .tree-row .tree-toggle-spacer::before {
+  content: '';
+  position: absolute;
+  left: -9px;
+  top: 50%;
+  width: 9px;
+  height: 1px;
+  background: var(--zen-text-faint);
+}
+.tree-label-only {
+  font-size: 13px; padding: 6px 8px; color: var(--zen-text-secondary);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 2px;
+  width: 100%;
+  display: block;
+}
+.tree-label-only:hover {
+  background: #F7C7CE;
+}
+.tree-label-only.active {
+  background: none;
+  color: var(--zen-red);
+  font-weight: 500;
 }
 </style>
