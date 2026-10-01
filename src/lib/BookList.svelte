@@ -1,5 +1,5 @@
 <script>
-import { invoke, convertFileSrc } from '@tauri-apps/api/core';
+import { convertFileSrc } from '@tauri-apps/api/core';
 
 let { books = [], value = $bindable(''), onSearch, onSelectBook, height = 224 } = $props();
 
@@ -27,13 +27,11 @@ function handleInput() {
   <div class="grid">
     {#each books as book (book.id)}
       <button type="button" class="zen-btn zen-card card" onclick={() => onSelectBook?.(book)}>
-        {#await invoke('get_cover_path', { bookPath: book.path }) then coverPath}
-          {#if coverPath}
-            <img class="cover" src={convertFileSrc(coverPath)} alt={book.title} />
-          {:else}
-            <div class="cover fallback"></div>
-          {/if}
-        {/await}
+{#if book.cover_path}
+  <img class="cover" src={convertFileSrc(book.cover_path)} alt={book.title} loading="lazy" />
+{:else}
+  <div class="cover fallback"></div>
+{/if}
         <div class="title">{book.title}</div>
       </button>
     {/each}

@@ -1,21 +1,32 @@
 <script>
-import { invoke, convertFileSrc } from '@tauri-apps/api/core';
+  import { invoke, convertFileSrc } from '@tauri-apps/api/core';
+  import DOMPurify from 'dompurify';
 
-let { book, libraryLoaded} = $props();
+  let { book, libraryLoaded } = $props();
+
+  let comments = $state(null);
+
+  $effect(() => {
+    if (!book) {
+      comments = null;
+      return;
+    }
+    invoke('get_comments', { bookId: book.id }).then((r) => (comments = r));
+  });
+
+  let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null);
 </script>
 
 <div class="preview">
   {#if book}
     <div class="big-cover">
-      {#await invoke('get_cover_path', { bookPath: book.path }) then coverPath}
-        {#if coverPath}
-          <img class="cover-img" src={convertFileSrc(coverPath)} alt={book.title} />
-        {:else}
-          <div class="cover-fallback">
-            <span>{book.title}</span>
-          </div>
-        {/if}
-      {/await}
+      {#if book.cover_path}
+  <img class="cover-img" src={convertFileSrc(book.cover_path)} alt={book.title} />
+{:else}
+  <div class="cover-fallback">
+    <span>{book.title}</span>
+  </div>
+{/if}
     </div>
 
     <div class="meta">
@@ -37,8 +48,8 @@ let { book, libraryLoaded} = $props();
           </div>
         {/if}
 
-        {#if book.comments}
-          <div class="description">{@html book.comments}</div>
+        {#if sanitizedComments}
+          <div class="description">{@html sanitizedComments}</div>
         {/if}
       </div>
 
@@ -49,13 +60,13 @@ let { book, libraryLoaded} = $props();
     </div>
 
   {:else}
-  <div class="empty">
-    {#if libraryLoaded}
-      Select a book to preview it here.
-    {:else}
-      Hint: Press Ctrl+O to add your existing Calibre Library
-    {/if}
-  </div>
+    <div class="empty">
+      {#if libraryLoaded}
+        Select a book to preview it here.
+      {:else}
+        Hint: Press Ctrl+O to add your existing Calibre Library
+      {/if}
+    </div>
   {/if}
 </div>
 

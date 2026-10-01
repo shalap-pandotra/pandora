@@ -26,6 +26,8 @@ let pendingHeight = null;
 let rafPending = false;
 let dragOffset = 0;
 
+let requestSeq = 0;
+
 onMount(() => {
   const state = new WeakMap(); // el -> { current, target, rafId, timer }
 
@@ -105,7 +107,10 @@ $effect(() => {
 });
 
 async function refreshBooks() {
-  books = await invoke('get_books_filtered', { filter: currentFilter });
+  const seq = ++requestSeq;
+  const result = await invoke('get_books_filtered', { filter: currentFilter });
+  if (seq !== requestSeq) return; // a newer request already started, discard this stale one
+  books = result;
   selectedBook = books.length ? books[0] : null;
 }
 
@@ -121,6 +126,8 @@ async function handleSearch(term) {
 
 function handleReset() {
   searchTerm = '';
+  currentFilter = { ...currentFilter, search: null };
+  refreshBooks();
 }
 
 function handleSelectBook(book) {
@@ -187,11 +194,19 @@ async function pickLibraryFolder() {
 }
 
 async function openLibrary() {
-  await invoke('set_library_path', { path: libraryPath });
+  try {
+    await invoke('set_library_path', { path: libraryPath });
+    await invoke('get_books_filtered', { filter: { author_id: null, series_id: null, tag_id: null, search: null, custom_column_id: null, custom_value_id: null } });
+  } catch (e) {
+    console.error('Failed to open library at this path:', e);
+    return; // bail before saving, don't persist a path that doesn't actually work
+  }
+
   await invoke('save_last_library_path', { path: libraryPath });
   libraryLoaded = true;
   await refreshBooks();
 }
+
 </script>
 
 <div class="frame">

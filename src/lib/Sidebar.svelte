@@ -17,6 +17,10 @@ let seriesExpanded = $state(true);
 let tagsExpanded = $state(true);
 let collapsedColumns = $state(new Set());
 
+let columnTrees = $derived(
+  multiTextColumns.map((col) => ({ ...col, tree: buildTree(col.values) }))
+);
+
 $effect(() => {
   if (!libraryLoaded) return;
   invoke('get_authors').then((r) => authors = r);
@@ -27,7 +31,7 @@ $effect(() => {
 
 function buildTree(values) {
   const root = [];
-  const nodeMap = new Map(); // path string -> node
+  const nodeMap = new Map();
 
   for (const v of values) {
     const parts = v.value.split('.');
@@ -36,20 +40,23 @@ function buildTree(values) {
 
     for (let i = 0; i < parts.length; i++) {
       currentPath = currentPath ? `${currentPath}.${parts[i]}` : parts[i];
+      const isLeaf = i === parts.length - 1;
       let node = nodeMap.get(currentPath);
 
       if (!node) {
-        const isLeaf = i === parts.length - 1;
-        node = {
-          path: currentPath,
-          label: parts[i],
-          children: [],
-          id: isLeaf ? v.id : null,
-          count: isLeaf ? v.count : 0
-        };
+        node = { path: currentPath, label: parts[i], children: [], id: null, count: 0 };
         nodeMap.set(currentPath, node);
         parentChildren.push(node);
       }
+
+      if (isLeaf) {
+        // Always set id/count on the leaf's own node, whether it already
+        // existed as an intermediate stub (created by a descendant seen
+        // earlier) or is brand new.
+        node.id = v.id;
+        node.count = v.count;
+      }
+
       parentChildren = node.children;
     }
   }
@@ -62,22 +69,6 @@ function toggleNode(path) {
   if (next.has(path)) next.delete(path);
     else next.add(path);
   expandedNodes = next;
-}
-
-function pruneEmptyBranches(nodes) {
-  const result = [];
-
-  for (const node of nodes) {
-    const prunedChildren = pruneEmptyBranches(node.children);
-    const hasOwnEntry = node.id !== null;
-    const hasSurvivingDescendant = prunedChildren.length > 0;
-
-    if (hasOwnEntry || hasSurvivingDescendant) {
-      result.push({ ...node, children: prunedChildren });
-    }
-  }
-
-  return result;
 }
 
 function selectCustomValue(columnId, valueId) {
@@ -109,12 +100,12 @@ function reset() {
   onReset?.();
   emitFilter();
 }
+
 function emitFilter() {
   onFilterChange?.({
     author_id: activeAuthor,
     series_id: activeSeries,
     tag_id: activeTag,
-    search: null,
     custom_column_id: activeCustomValue?.columnId ?? null,
     custom_value_id: activeCustomValue?.valueId ?? null
   });
@@ -225,7 +216,7 @@ const tools = [
     {/if}
   </div>
 
-{#each multiTextColumns as col (col.id)}
+{#each columnTrees as col (col.id)}
   <div>
     <button class="zen-btn section-header" onclick={() => toggleColumnCollapsed(col.id)}>
       <span class="section-title" style="margin:0;">{col.name}</span>
@@ -233,7 +224,7 @@ const tools = [
     </button>
     {#if !collapsedColumns.has(col.id)}
       <div class="stack">
-        {#each pruneEmptyBranches(buildTree(col.values)) as node}
+        {#each col.tree as node}
           {@render treeNode(node, col.id)}
         {/each}
       </div>

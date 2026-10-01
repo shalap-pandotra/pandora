@@ -1,3 +1,4 @@
+use rusqlite::OptionalExtension;
 use rusqlite::Connection;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -12,7 +13,7 @@ pub struct Book {
     pub tags: Vec<String>,
     pub path: String,
     pub has_cover: bool,
-    pub comments: Option<String>,
+    pub cover_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -123,109 +124,121 @@ ORDER BY cnt DESC, t.name ASC"
     rows.collect()
 }
 
+fn restore_author_name(name: &str) -> String {
+    name.replace('|', ",")
+}
+
+fn resolve_cover(library_path: &str, book_path: &str, has_cover: bool) -> Option<String> {
+    if !has_cover { return None; }
+    let cover = std::path::Path::new(library_path).join(book_path).join("cover.jpg");
+    cover.exists().then(|| cover.to_string_lossy().to_string())
+}
+
 pub fn open_library(library_path: &str) -> rusqlite::Result<Connection> {
     let db_path = PathBuf::from(library_path).join("metadata.db");
     // Open read-only — phase 1 never writes
     Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
 }
 
-pub fn list_books(conn: &Connection, filter: &BookFilter) -> rusqlite::Result<Vec<Book>> {
+pub fn get_comments(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT text FROM comments WHERE book = ?1",
+        [book_id],
+        |row| row.get(0),
+    ).optional()
+}
+
+pub fn list_books(conn: &Connection, library_path: &str, filter: &BookFilter) -> rusqlite::Result<Vec<Book>> {
     let mut sql = String::from(
         "SELECT DISTINCT
-b.id, b.title, b.path, b.has_cover, b.series_index,
-(SELECT group_concat(a.name, ' & ')
-FROM authors a
-JOIN books_authors_link bal ON bal.author = a.id
-WHERE bal.book = b.id) as authors,
-(SELECT s.name FROM series s
-JOIN books_series_link bsl ON bsl.series = s.id
-WHERE bsl.book = b.id) as series,
-(SELECT text FROM comments WHERE comments.book = b.id) as comments
-FROM books b"
+            b.id, b.title, b.path, b.has_cover, b.series_index,
+            (SELECT group_concat(a.name, ' & ')
+                FROM authors a
+                JOIN books_authors_link bal ON bal.author = a.id
+                WHERE bal.book = b.id) as authors,
+            (SELECT s.name FROM series s
+                JOIN books_series_link bsl ON bsl.series = s.id
+                WHERE bsl.book = b.id) as series,
+(SELECT group_concat(t.name, '\u{001f}')
+                FROM tags t
+                JOIN books_tags_link btl ON btl.tag = t.id
+                WHERE btl.book = b.id) as tags_concat
+         FROM books b"
     );
+
     let mut conditions: Vec<String> = vec![];
-    if filter.author_id.is_some() {
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![];
+
+    if let Some(id) = filter.author_id {
         sql.push_str(" JOIN books_authors_link f_bal ON f_bal.book = b.id");
         conditions.push("f_bal.author = ?".into());
+        params.push(Box::new(id));
     }
-    if let (Some(col_id), Some(_)) = (filter.custom_column_id, filter.custom_value_id) {
-        sql.push_str(&format!(
-        " JOIN books_custom_column_{col_id}_link f_cc ON f_cc.book = b.id"
-    ));
-        conditions.push("f_cc.value = ?".into());
-    }
-    if filter.series_id.is_some() {
+    if let Some(id) = filter.series_id {
         sql.push_str(" JOIN books_series_link f_bsl ON f_bsl.book = b.id");
         conditions.push("f_bsl.series = ?".into());
+        params.push(Box::new(id));
     }
-    if filter.tag_id.is_some() {
+    if let Some(id) = filter.tag_id {
         sql.push_str(" JOIN books_tags_link f_btl ON f_btl.book = b.id");
         conditions.push("f_btl.tag = ?".into());
+        params.push(Box::new(id));
     }
-
-
-    if filter.search.is_some() {
+    if let (Some(col_id), Some(val_id)) = (filter.custom_column_id, filter.custom_value_id) {
+        sql.push_str(&format!(" JOIN books_custom_column_{col_id}_link f_cc ON f_cc.book = b.id"));
+        conditions.push("f_cc.value = ?".into());
+        params.push(Box::new(val_id));
+    }
+    if let Some(ref s) = filter.search {
         conditions.push(
             "(b.title LIKE ? \
-                OR EXISTS (SELECT 1 FROM books_authors_link bal2 \
-                JOIN authors a2 ON a2.id = bal2.author \
-                WHERE bal2.book = b.id AND a2.name LIKE ?) \
-                OR EXISTS (SELECT 1 FROM books_tags_link btl2 \
-                JOIN tags t2 ON t2.id = btl2.tag \
-                WHERE btl2.book = b.id AND t2.name LIKE ?))".into()
+              OR EXISTS (SELECT 1 FROM books_authors_link bal2 \
+                         JOIN authors a2 ON a2.id = bal2.author \
+                         WHERE bal2.book = b.id AND a2.name LIKE ?) \
+              OR EXISTS (SELECT 1 FROM books_tags_link btl2 \
+                         JOIN tags t2 ON t2.id = btl2.tag \
+                         WHERE btl2.book = b.id AND t2.name LIKE ?))".into()
         );
+        let pattern = format!("%{}%", s);
+        params.push(Box::new(pattern.clone()));
+        params.push(Box::new(pattern.clone()));
+        params.push(Box::new(pattern));
     }
 
     if !conditions.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&conditions.join(" AND "));
     }
-    sql.push_str(" ORDER BY b.title");
+    sql.push_str(" ORDER BY b.sort");
 
     let mut stmt = conn.prepare(&sql)?;
-
-    // Bind params in the same order conditions were pushed
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![];
-    if let Some(id) = filter.author_id { params.push(Box::new(id)); }
-    if let Some(id) = filter.series_id { params.push(Box::new(id)); }
-    if let Some(id) = filter.tag_id { params.push(Box::new(id)); }
-    if let Some(ref s) = filter.search {
-        let pattern = format!("%{}%", s);
-        params.push(Box::new(pattern.clone()));
-        params.push(Box::new(pattern.clone()));
-        params.push(Box::new(pattern));
-    }
-    if let Some(val_id) = filter.custom_value_id { params.push(Box::new(val_id)); }
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
 
     let book_iter = stmt.query_map(param_refs.as_slice(), |row| {
         let id: i64 = row.get(0)?;
+        let path: String = row.get(2)?;
+        let has_cover = row.get::<_, i64>(3)? != 0;
+        let cover_path = resolve_cover(library_path, &path, has_cover);
+        let authors = row.get::<_, Option<String>>(5)?
+            .map(|s| restore_author_name(&s))
+            .unwrap_or_default();
+        let tags_concat: Option<String> = row.get(7)?;
+        let tags = tags_concat
+            .map(|s| s.split('\u{1f}').map(String::from).collect())
+            .unwrap_or_default();
+
         Ok(Book {
             id,
             title: row.get(1)?,
-            path: row.get(2)?,
-            has_cover: row.get::<_, i64>(3)? != 0,
+            path,
+            has_cover,
             series_index: row.get(4)?,
-            authors: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            authors,
             series: row.get(6)?,
-            comments: row.get(7)?,
-            tags: vec![],
+            cover_path,
+            tags,
         })
     })?;
 
-    let mut books: Vec<Book> = book_iter.collect::<Result<_, _>>()?;
-
-    for book in &mut books {
-        let mut tag_stmt = conn.prepare(
-            "SELECT t.name FROM tags t
-JOIN books_tags_link btl ON btl.tag = t.id
-WHERE btl.book = ?1"
-        )?;
-        let tags: Vec<String> = tag_stmt
-            .query_map([book.id], |row| row.get(0))?
-            .collect::<Result<_, _>>()?;
-        book.tags = tags;
-    }
-
-    Ok(books)
+    book_iter.collect()
 }
