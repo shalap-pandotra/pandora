@@ -5,6 +5,7 @@ import TopBar from '../lib/TopBar.svelte';
 import Sidebar from '../lib/Sidebar.svelte';
 import { onMount } from 'svelte';
 import PreviewPanel from '../lib/PreviewPanel.svelte';
+import EditMetadataModal from '../lib/EditMetadataModal.svelte';
 import BookList from '../lib/BookList.svelte';
 import StatusBar from '../lib/StatusBar.svelte';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -13,6 +14,8 @@ let libraryPath = $state('');
 let libraryLoaded = $state(false);
 let books = $state([]);
 let selectedBook = $state(null);
+let editingBook = $state(null);
+let sidebarVersion = $state(0);
 let searchTerm = $state('');
 let currentFilter = $state({ author_id: null, series_id: null, tag_id: null, search: null, custom_column_id: null, custom_value_id: null });
 
@@ -106,12 +109,12 @@ $effect(() => {
   return () => resizeObserver.disconnect();
 });
 
-async function refreshBooks() {
+async function refreshBooks(keepId = null) {
   const seq = ++requestSeq;
   const result = await invoke('get_books_filtered', { filter: currentFilter });
   if (seq !== requestSeq) return; // a newer request already started, discard this stale one
   books = result;
-  selectedBook = books.length ? books[0] : null;
+  selectedBook = (keepId !== null && books.find((b) => b.id === keepId)) || (books.length ? books[0] : null);
 }
 
 async function handleFilterChange(filter) {
@@ -130,10 +133,19 @@ function handleReset() {
   refreshBooks();
 }
 
+function openEditor() {
+  if (selectedBook) editingBook = selectedBook;
+}
+
+async function handleSaved(id) {
+  editingBook = null;
+  sidebarVersion += 1;
+  await refreshBooks(id);
+}
+
 function handleSelectBook(book) {
   selectedBook = book;
 }
-
 
 function startDrag(e) {
   dragging = true;
@@ -209,12 +221,15 @@ async function openLibrary() {
 
 </script>
 
+{#if editingBook}
+  <EditMetadataModal book={editingBook} onClose={() => (editingBook = null)} onSaved={handleSaved} />
+{/if}
 <div class="frame">
   <TopBar />
   <div class="body-row">
-    <Sidebar onFilterChange={handleFilterChange} onReset={handleReset} libraryLoaded={libraryLoaded} />
+    <Sidebar onFilterChange={handleFilterChange} onReset={handleReset} libraryLoaded={libraryLoaded} onEditMetadata={openEditor} refreshKey={sidebarVersion} />
     <div class="main-col" bind:this={mainColEl}>
-      <PreviewPanel book={selectedBook} libraryLoaded={libraryLoaded} />
+      <PreviewPanel book={selectedBook} libraryLoaded={libraryLoaded} onEdit={openEditor} />
       <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div

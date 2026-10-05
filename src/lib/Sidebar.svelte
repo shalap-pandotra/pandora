@@ -1,8 +1,9 @@
 <script>
 import { invoke } from '@tauri-apps/api/core';
 import { onMount } from 'svelte';
+import  VirtualList  from './VirtualList.svelte';
 
-let { onFilterChange, onReset, libraryLoaded } = $props();
+let { onFilterChange, onReset, libraryLoaded, onEditMetadata, refreshKey } = $props();
 let authors = $state([]);
 let series = $state([]);
 let tags = $state([]);
@@ -18,23 +19,36 @@ let tagsExpanded = $state(true);
 let collapsedColumns = $state(new Set());
 
 let columnTrees = $derived(
-  multiTextColumns.map((col) => ({ ...col, tree: buildTree(col.values) }))
+  multiTextColumns.map((col) => ({ ...col,  tree: buildTree(col.values, col.is_hierarchical)}))
 );
 
 $effect(() => {
+  void refreshKey;
   if (!libraryLoaded) return;
   invoke('get_authors').then((r) => authors = r);
-  invoke('get_series').then((r) => series = r);
-  invoke('get_tags').then((r) => tags = r);
+  invoke('get_series').then((r) => {
+    series = r;
+    if (activeSeries !== null && !r.some((s) => s.id === activeSeries)) {
+      activeSeries = null;
+      emitFilter();
+    }
+  });
+  invoke('get_tags').then((r) => {
+    tags = r;
+    if (activeTag !== null && !r.some((t) => t.id === activeTag)) {
+      activeTag = null;
+      emitFilter();
+    }
+  });
   invoke('get_multi_text_columns').then((r) => (multiTextColumns = r));
 });
 
-function buildTree(values) {
+function buildTree(values, hierarchical) {
   const root = [];
   const nodeMap = new Map();
 
   for (const v of values) {
-    const parts = v.value.split('.');
+    const parts = hierarchical ? v.value.split('.') : [v.value];
     let currentPath = '';
     let parentChildren = root;
 
@@ -114,14 +128,14 @@ function emitFilter() {
 function toggleColumnCollapsed(colId) {
   const next = new Set(collapsedColumns);
   if (next.has(colId)) next.delete(colId);
-  else next.add(colId);
+    else next.add(colId);
   collapsedColumns = next;
 }
 
 const tools = [
   { label: 'Add books', path: 'M12 5v14M5 12h14' },
   { label: 'Remove books', path: 'M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14' },
-  { label: 'Edit metadata', path: 'M4 4h10l6 6v10a1 1 0 01-1 1H4a1 1 0 01-1-1V5a1 1 0 011-1z' },
+  { label: 'Edit metadata', path: 'M4 4h10l6 6v10a1 1 0 01-1 1H4a1 1 0 01-1-1V5a1 1 0 011-1z', run: () => onEditMetadata?.() },
   { label: 'Convert books', path: 'M17 3l4 4-11 11H6v-4z' },
   { label: 'Save to disk', path: 'M4 19V6a2 2 0 012-2h8l6 6v9a2 2 0 01-2 2H6a2 2 0 01-2-2z' },
   { label: 'Connect / share', path: 'M3 9h18M8 4v5', rect: true }
@@ -134,7 +148,7 @@ const tools = [
     <div class="eyebrow">Tools</div>
     <div class="stack">
       {#each tools as tool}
-        <button class="zen-btn tool-btn">
+        <button class="zen-btn tool-btn" onclick={tool.run}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--zen-text-secondary)" stroke-width="2">
             {#if tool.rect}<rect x="3" y="4" width="18" height="16" rx="2" />{/if}
             <path d={tool.path} />
@@ -161,16 +175,18 @@ const tools = [
     </button>
     {#if authorsExpanded}
       <div class="stack">
-        {#each authors as row (row.id)}
-          <button
-            class="zen-btn filter-row"
-            class:active={activeAuthor === row.id}
-            onclick={() => toggleAuthor(row.id)}
-          >
-            <span>{row.name}</span>
-            <span class="filter-count">{row.count}</span>
-          </button>
-        {/each}
+        <VirtualList items={authors} itemHeight={32}>
+          {#snippet row(author)}
+            <button
+              class="zen-btn filter-row"
+              class:active={activeAuthor === author.id}
+              onclick={() => toggleAuthor(author.id)}
+            >
+              <span class="filter-name">{author.name}</span>
+              <span class="filter-count">{author.count}</span>
+            </button>
+          {/snippet}
+        </VirtualList>
       </div>
     {/if}
   </div>
@@ -216,21 +232,21 @@ const tools = [
     {/if}
   </div>
 
-{#each columnTrees as col (col.id)}
-  <div>
-    <button class="zen-btn section-header" onclick={() => toggleColumnCollapsed(col.id)}>
-      <span class="section-title" style="margin:0;">{col.name}</span>
-      <span class="section-chevron">{collapsedColumns.has(col.id) ? '+' : '−'}</span>
-    </button>
-    {#if !collapsedColumns.has(col.id)}
-      <div class="stack">
-        {#each col.tree as node}
-          {@render treeNode(node, col.id)}
-        {/each}
-      </div>
-    {/if}
-  </div>
-{/each}
+  {#each columnTrees as col (col.id)}
+    <div>
+      <button class="zen-btn section-header" onclick={() => toggleColumnCollapsed(col.id)}>
+        <span class="section-title" style="margin:0;">{col.name}</span>
+        <span class="section-chevron">{collapsedColumns.has(col.id) ? '+' : '−'}</span>
+      </button>
+      {#if !collapsedColumns.has(col.id)}
+        <div class="stack">
+          {#each col.tree as node}
+            {@render treeNode(node, col.id)}
+          {/each}
+        </div>
+      {/if}
+    </div>
+  {/each}
 
   {#snippet treeNode(node, columnId)}
     <div class="tree-row">
@@ -333,11 +349,20 @@ const tools = [
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+  height: 30px;
+  box-sizing: border-box;
   padding: 6px 8px;
   border-radius: 2px;
   font-size: 13px;
   text-align: left;
   width: 100%;
+}
+.filter-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .filter-row:hover {
   background: #F7C7CE;
@@ -347,7 +372,7 @@ const tools = [
   color: var(--zen-red);
   font-weight: 500;
 }
-.filter-count { font-size: 11px; color: var(--zen-count); }
+.filter-count { font-size: 11px; color: var(--zen-count); flex: none; }
 .tag-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .tag-pill {
   padding: 5px 10px;
@@ -436,4 +461,5 @@ const tools = [
   color: var(--zen-red);
   font-weight: 500;
 }
+
 </style>

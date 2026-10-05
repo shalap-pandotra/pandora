@@ -1,32 +1,32 @@
 <script>
-  import { invoke, convertFileSrc } from '@tauri-apps/api/core';
-  import DOMPurify from 'dompurify';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
+import DOMPurify from 'dompurify';
 
-  let { book, libraryLoaded } = $props();
+let { book, libraryLoaded, onEdit } = $props();
 
-  let comments = $state(null);
+let comments = $state(null);
 
-  $effect(() => {
-    if (!book) {
-      comments = null;
-      return;
-    }
-    invoke('get_comments', { bookId: book.id }).then((r) => (comments = r));
-  });
+$effect(() => {
+  if (!book) {
+    comments = null;
+    return;
+  }
+  invoke('get_comments', { bookId: book.id }).then((r) => (comments = r));
+});
 
-  let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null);
+let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null);
 </script>
 
 <div class="preview">
   {#if book}
     <div class="big-cover">
       {#if book.cover_path}
-  <img class="cover-img" src={convertFileSrc(book.cover_path)} alt={book.title} />
-{:else}
-  <div class="cover-fallback">
-    <span>{book.title}</span>
-  </div>
-{/if}
+        <img class="cover-img" src={convertFileSrc(book.cover_path)} alt={book.title} />
+      {:else}
+        <div class="cover-fallback">
+          <span>{book.title}</span>
+        </div>
+      {/if}
     </div>
 
     <div class="meta">
@@ -40,6 +40,17 @@
 
         <div class="author">by {book.authors}</div>
 
+        {#if book.rating}
+          {@const stars = Math.floor(book.rating / 2)}
+          <div class="stars" role="img" aria-label="Rated {stars} out of 5">
+            {#each [1, 2, 3, 4, 5] as n}
+              <svg width="16" height="16" viewBox="0 0 24 24" fill={n <= stars ? 'var(--zen-red)' : 'none'} stroke="var(--zen-red)" stroke-width="1.5">
+                <path d="M12 2l2.9 6.6 7.1.7-5.4 4.8 1.6 7-6.2-3.7-6.2 3.7 1.6-7-5.4-4.8 7.1-.7z" />
+              </svg>
+            {/each}
+          </div>
+        {/if}
+
         {#if book.tags?.length}
           <div class="pills">
             {#each book.tags as tag}
@@ -50,12 +61,11 @@
 
         {#if sanitizedComments}
           <div class="description">{@html sanitizedComments}</div>
-        {/if}
-      </div>
+        {/if}     </div>
 
       <div class="meta-actions">
         <button class="zen-btn btn-primary">Open book</button>
-        <button class="zen-btn btn-secondary">Edit metadata</button>
+        <button class="zen-btn btn-secondary" onclick={onEdit}>Edit metadata</button>
       </div>
     </div>
 
@@ -131,6 +141,7 @@
   padding-top: 16px;
 }
 .meta h1 { font-family: var(--zen-font-serif); font-size: 32px; font-weight: 600; color: var(--zen-ink); line-height: 1.15; margin: 0; }
+.stars { display: flex; gap: 3px; }
 .series { font-size: 15px; color: var(--zen-text-muted); margin-top: 6px; }
 .author { font-size: 15px; color: var(--zen-text-secondary); }
 .pills { display: flex; flex-wrap: wrap; gap: 8px; }

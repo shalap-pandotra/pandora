@@ -12,6 +12,7 @@ use rusqlite::Connection;
 struct AppState {
     library_path: Mutex<Option<String>>,
     conn: Mutex<Option<Connection>>,
+    backed_up: Mutex<bool>,
 }
 
 fn config_path(app: &tauri::AppHandle) -> std::path::PathBuf {
@@ -38,6 +39,7 @@ fn set_library_path(path: String, state: State<AppState>) -> Result<(), String> 
     let conn = library::open_library(&path).map_err(|e| e.to_string())?;
     *state.conn.lock().unwrap() = Some(conn);
     *state.library_path.lock().unwrap() = Some(path);
+    *state.backed_up.lock().unwrap() = false;
     Ok(())
 }
 
@@ -82,12 +84,64 @@ fn get_books_filtered(filter: library::BookFilter, state: State<AppState>) -> Re
     with_conn(&state, |conn| library::list_books(conn, &path, &filter).map_err(|e| e.to_string()))
 }
 
+fn backup_once(app: &tauri::AppHandle, state: &State<AppState>) -> Result<(), String> {
+    let mut done = state.backed_up.lock().unwrap();
+    if *done {
+        return Ok(());
+    }
+    let library = get_path(state)?;
+    let src = std::path::Path::new(&library).join("metadata.db");
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?
+        .join("backups");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    let name = std::path::Path::new(&library)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "library".into());
+    let dest = dir.join(format!("{}-{}.db", name, stamp));
+    std::fs::copy(&src, &dest).map_err(|e| e.to_string())?;
+    *done = true;
+    eprintln!("backup written to {}", dest.display());
+    Ok(())
+}
+
+#[tauri::command]
+fn save_metadata(app: tauri::AppHandle, book_id: i64, edit: library::MetadataEdit, state: State<AppState>) -> Result<(), String> {
+    if let Some(stars) = edit.rating {
+        if !(0..=5).contains(&stars) {
+            return Err("Rating must be between 0 and 5 stars".to_string());
+        }
+    }
+    if let Some(i) = edit.series_index {
+        if !i.is_finite() {
+            return Err("Series number must be a number".to_string());
+        }
+    }
+    backup_once(&app, &state)?;
+    let path = get_path(&state)?;
+    let mut conn = library::open_library_rw(&path).map_err(|e| e.to_string())?;
+    library::write_metadata(&mut conn, book_id, &edit).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_next_series_index(series: String, state: State<AppState>) -> Result<f64, String> {
+    with_conn(&state, |conn| library::next_series_index(conn, &series).map_err(|e| e.to_string()))
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             library_path: Mutex::new(None),
             conn: Mutex::new(None),
+            backed_up: Mutex::new(false),
         })
         .invoke_handler(tauri::generate_handler![
             set_library_path,
@@ -97,6 +151,8 @@ fn main() {
             get_books_filtered,
             get_multi_text_columns,
             get_comments,
+            get_next_series_index,
+            save_metadata,
             save_last_library_path,
             load_last_library_path
         ])
