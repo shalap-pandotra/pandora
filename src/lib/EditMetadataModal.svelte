@@ -9,6 +9,10 @@ let stars = $state(0);
 let originalStars = $derived(Math.floor((book.rating ?? 0) / 2));
 let tagsText = $state('');
 let originalTags = [];
+let titleText = $state('');
+let originalTitle = $state('');
+let authorsText = $state('');
+let originalAuthors = $state([]);
 let seriesText = $state('');
 let originalSeries = '';
 let seriesIndex = $state(1);
@@ -18,6 +22,15 @@ let loaded = $state(false);
 let saving = $state(false);
 let error = $state('');
 let commentsEl = $state();
+
+// Only "&" separates authors. A comma inside a name belongs to that name.
+function parseAuthors(text) {
+  return text.split('&').map((a) => a.trim()).filter((a) => a !== '');
+}
+let renamesFiles = $derived(
+  titleText.trim() !== originalTitle ||
+    parseAuthors(authorsText).join('\u0001') !== originalAuthors.join('\u0001')
+);
 
 async function seriesChosen() {
   const name = seriesText.trim();
@@ -49,6 +62,10 @@ $effect(() => {
     stars = originalStars;
     tagsText = book.tags.join(', ');
     originalTags = parseTags(tagsText);
+    originalTitle = book.title;
+    titleText = book.title;
+    originalAuthors = parseAuthors(book.authors);
+    authorsText = book.authors;
     seriesText = book.series ?? '';
     originalSeries = seriesText;
     originalIndex = book.series ? book.series_index : null;
@@ -68,6 +85,11 @@ async function save() {
   if (stars !== originalStars) edit.rating = stars;
   if (keyOf(parseTags(tagsText)) !== keyOf(originalTags)) edit.tags = parseTags(tagsText);
 
+  // Capitalization counts as a change here too, since it renames the folder and files.
+  const newTitle = titleText.trim();
+  if (newTitle !== originalTitle) edit.title = newTitle;
+  const newAuthors = parseAuthors(authorsText);
+  if (newAuthors.join('\u0001') !== originalAuthors.join('\u0001')) edit.authors = newAuthors;
   // Capitalization counts as a change, because calibre renames the shared series everywhere.
   const seriesName = seriesText.trim();
   const seriesChanged = seriesName !== originalSeries;
@@ -108,11 +130,9 @@ function handleKey(e) {
 
     <div class="grid">
       <label for="em-title">Title</label>
-      <input id="em-title" value={book.title} disabled />
-
+      <input id="em-title" bind:value={titleText} disabled={!loaded} />
       <label for="em-authors">Author(s)</label>
-      <input id="em-authors" value={book.authors} disabled />
-
+      <input id="em-authors" bind:value={authorsText} disabled={!loaded} placeholder="Separate authors with &amp;" />
       <label for="em-series">Series</label>
       <div class="row">
         <input id="em-series" list="em-series-list" bind:value={seriesText} onchange={seriesChosen} disabled={!loaded} placeholder="No series" />
@@ -149,6 +169,9 @@ function handleKey(e) {
     <label for="em-comments">Comments (HTML)</label>
     <textarea id="em-comments" bind:this={commentsEl} bind:value={comments} rows="12" disabled={!loaded}></textarea>
 
+    {#if renamesFiles}
+      <div class="hint">Saving will rename this book's folder and files on disk.</div>
+    {/if}
     {#if error}<div class="error">{error}</div>{/if}
 
     <div class="actions">

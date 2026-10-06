@@ -159,7 +159,191 @@ pub fn title_sort(title: &str) -> String {
     t.to_string()
 }
 
+const BAD_FILENAME_CHARS: [char; 10] = ['\\', '|', '?', '*', '<', '"', ':', '>', '+', '/'];
+const WINDOWS_RESERVED: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+const AUTHOR_PREFIXES: [&str; 5] = ["mr", "mrs", "ms", "dr", "prof"];
+const AUTHOR_COPY_WORDS: [&str; 12] = [
+    "agency", "corporation", "company", "co.", "council", "committee", "inc.", "institute",
+    "national", "society", "club", "team",
+];
+const AUTHOR_SUFFIXES: [&str; 13] = [
+    "jr", "sr", "inc", "ph.d", "phd", "md", "m.d", "i", "ii", "iii", "iv", "junior", "senior",
+];
+
+// Like Python's os.path.splitext: a name made only of dots has no extension.
+fn split_ext(s: &str) -> (&str, &str) {
+    match s.rfind('.') {
+        None => (s, ""),
+        Some(i) => {
+            if s[..i].chars().all(|c| c == '.') {
+                (s, "")
+            } else {
+                (&s[..i], &s[i..])
+            }
+        }
+    }
+}
+
+fn sanitize_file_name(name: &str) -> String {
+    let replaced: String = name
+        .chars()
+        .map(|c| if BAD_FILENAME_CHARS.contains(&c) || (c as u32) < 32 { '_' } else { c })
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    let trimmed = replaced.trim();
+    let (base, ext) = split_ext(trimmed);
+    let base = if !base.is_empty() && base.chars().all(|c| c == '.') {
+        "_".to_string()
+    } else {
+        base.to_string()
+    };
+    let mut one = format!("{}{}", base.replace("..", "_"), ext);
+    if one.ends_with('.') || one.ends_with(' ') {
+        one.pop();
+        one.push('_');
+    }
+    if one.starts_with('.') {
+        one.replace_range(..1, "_");
+    }
+    one
+}
+
+fn ascii_filename(orig: &str) -> String {
+    let ascii = deunicode::deunicode(orig).replace('?', "_");
+    sanitize_file_name(&ascii)
+}
+
+fn path_limit(library_path: &str) -> usize {
+    #[cfg(windows)]
+    {
+        let mut limit = 40usize;
+        let len = library_path.chars().count();
+        if len + 4 * limit + 10 > 259 {
+            limit = 259usize.saturating_sub(len + 10) / 4;
+        }
+        limit
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = library_path;
+        100
+    }
+}
+
+// Folder for a book, relative to the library. Uses only the first author.
+pub fn book_dir(library_path: &str, book_id: i64, title: &str, first_author: &str) -> String {
+    let id_suffix = format!(" ({})", book_id);
+    let l = path_limit(library_path).saturating_sub(id_suffix.len() / 2 + 2).max(1);
+    let mut author: String = ascii_filename(first_author).chars().take(l).collect();
+    let mut title_part: String = ascii_filename(title).chars().take(l).collect();
+    while author.ends_with(' ') || author.ends_with('.') {
+        author.pop();
+    }
+    if author.is_empty() {
+        author = "Unknown".to_string();
+    }
+    if WINDOWS_RESERVED.contains(&author.to_uppercase().as_str()) {
+        author.push('w');
+    }
+    if title_part.is_empty() {
+        title_part = "Unknown".to_string();
+    }
+    format!("{}/{}{}", author, title_part, id_suffix)
+}
+
+// Base name shared by every format file of a book, without the extension.
+pub fn book_file_base(library_path: &str, title: &str, first_author: &str) -> String {
+    // Room is reserved for the extension, at least 14 characters, so half of that is 7.
+    let l = path_limit(library_path).saturating_sub(7 + 2).max(1);
+    let author: String = ascii_filename(first_author).chars().take(l).collect();
+    let title: String = ascii_filename(title).chars().take(l).collect();
+    let mut name = format!("{} - {}", title, author);
+    while name.ends_with('.') {
+        name.pop();
+    }
+    name
+}
+
+pub fn author_sort_for(stored_name: &str) -> String {
+    let author = stored_name.replace('|', ",");
+    let author = author.trim();
+    let mut tokens: Vec<&str> = author.split_whitespace().collect();
+    if tokens.len() < 2 {
+        return author.to_string();
+    }
+    // Names containing a "copy word" like Corporation are left unchanged.
+    if tokens.iter().any(|t| AUTHOR_COPY_WORDS.contains(&t.to_lowercase().as_str())) {
+        return author.to_string();
+    }
+    // Leading prefixes such as Dr. are dropped from the sort entirely.
+    let is_prefix =
+    |t: &str| AUTHOR_PREFIXES.contains(&t.trim_end_matches('.').to_lowercase().as_str());
+    while !tokens.is_empty() && is_prefix(tokens[0]) {
+        tokens.remove(0);
+    }
+    if tokens.is_empty() {
+        return author.to_string();
+    }
+    // Trailing suffixes such as Jr. move to the end of the result.
+    let is_suffix =
+    |t: &str| AUTHOR_SUFFIXES.contains(&t.trim_end_matches('.').to_lowercase().as_str());
+    let mut suffix: Vec<&str> = Vec::new();
+    while !tokens.is_empty() && is_suffix(tokens[tokens.len() - 1]) {
+        suffix.insert(0, tokens.pop().unwrap());
+    }
+    if tokens.is_empty() {
+        return author.to_string();
+    }
+    // A name that already contains a comma is copied unchanged.
+    if tokens.join("").contains(',') {
+        return author.to_string();
+    }
+    let count = tokens.len();
+    let surname = tokens.pop().unwrap();
+    let mut out = surname.to_string();
+    if count > 1 {
+        out.push(',');
+        out.push(' ');
+        out.push_str(&tokens.join(" "));
+    }
+    if !suffix.is_empty() {
+        out.push(' ');
+        out.push_str(&suffix.join(" "));
+    }
+    out
+}
+
+#[cfg(test)]
+mod author_sort_tests {
+    use super::author_sort_for;
+
+    // Every expected value below was copied from what calibre produced on your library.
+    #[test]
+    fn author_sort_matches_calibre() {
+        let cases = [
+            ("Isaac Asimov", "Asimov, Isaac"),
+            ("Kim Stanley Robinson", "Robinson, Kim Stanley"),
+            ("Baoshu", "Baoshu"),
+            ("Nemo Ramjet| Isaiah Nichols", "Nemo Ramjet, Isaiah Nichols"),
+            ("Gabriel García Márquez", "Márquez, Gabriel García"),
+            ("रामधारी सि\u{902}ह दिनकर", "दिनकर, रामधारी सि\u{902}ह"),
+            ("Dr. Seuss", "Seuss"),
+            ("Acme Corporation", "Acme Corporation"),
+            ("Sammy Davis Sr.", "Davis, Sammy Sr."),
+            ("John Smith Ph.D.", "Smith, John Ph.D."),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(author_sort_for(name), expected, "name: {}", name);
+        }
+    }
+}
+
 fn resolve_cover(library_path: &str, book_path: &str, has_cover: bool) -> Option<String> {
+
     if !has_cover { return None; }
     let cover = std::path::Path::new(library_path).join(book_path).join("cover.jpg");
     cover.exists().then(|| cover.to_string_lossy().to_string())
@@ -194,14 +378,463 @@ pub struct MetadataEdit {
     pub tags: Option<Vec<String>>, // None means unchanged
     pub series: Option<String>,    // None means unchanged, empty string clears
     pub series_index: Option<f64>, // None means unchanged
+    pub title: Option<String>,     // None means unchanged
+    pub authors: Option<Vec<String>>, // None means unchanged, one entry per author
     pub comments: Option<String>, // None means unchanged
     pub rating: Option<i64>,      // None means unchanged, 0 clears, 1 to 5 sets stars
 }
 
 // Each field only runs if it was actually changed. One transaction covers all of
 // them, so a failure part way through leaves the library untouched.
-pub fn write_metadata(conn: &mut Connection, book_id: i64, edit: &MetadataEdit) -> rusqlite::Result<()> {
-    let tx = conn.transaction()?;
+pub fn write_metadata(
+    conn: &mut Connection,
+    library_path: &str,
+    book_id: i64,
+    edit: &MetadataEdit,
+) -> Result<Vec<(String, String)>, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    // If this fails, tx is dropped and the database part rolls back by itself.
+    let log = apply_edit(&tx, library_path, book_id, edit)?;
+    if let Err(e) = tx.commit() {
+        // The folders were already moved, so move them back.
+        log.undo();
+        return Err(e.to_string());
+    }
+    let lib = std::path::Path::new(library_path);
+    let rel = |p: &std::path::Path| -> String {
+        p.strip_prefix(lib).unwrap_or(p).to_string_lossy().replace('\\', "/")
+    };
+    Ok(log.moves.iter().map(|(a, b)| (rel(a.as_path()), rel(b.as_path()))).collect())
+}
+
+fn db<T>(r: rusqlite::Result<T>) -> Result<T, String> {
+    r.map_err(|e| e.to_string())
+}
+
+#[derive(Default)]
+struct FsLog {
+    moves: Vec<(PathBuf, PathBuf)>,
+    created: Vec<PathBuf>,
+    removed: Vec<PathBuf>,
+}
+
+impl FsLog {
+    // Best effort, in reverse order: recreate removed folders, move things back, drop new folders.
+    fn undo(&self) {
+        for d in &self.removed {
+            let _ = std::fs::create_dir_all(d);
+        }
+        for (from, to) in self.moves.iter().rev() {
+            let _ = std::fs::rename(to, from);
+        }
+        for d in self.created.iter().rev() {
+            let _ = std::fs::remove_dir(d);
+        }
+    }
+}
+
+struct BookPlan {
+    id: i64,
+    old_path: String,
+    new_path: String,
+    // data row id, format, old base name, new base name
+    files: Vec<(i64, String, String, String)>,
+}
+
+fn author_dir_of(path: &str) -> &str {
+    path.split_once('/').map(|(a, _)| a).unwrap_or(path)
+}
+
+fn title_dir_of(path: &str) -> &str {
+    path.split_once('/').map(|(_, t)| t).unwrap_or("")
+}
+
+fn touch(tx: &Connection, book_id: i64) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE books SET last_modified = strftime('%Y-%m-%d %H:%M:%f+00:00', 'now') WHERE id = ?1",
+        [book_id],
+    )?;
+    Ok(())
+}
+
+fn apply_title(tx: &Connection, book_id: i64, title: &str) -> rusqlite::Result<()> {
+    let t = title.trim();
+    let t = if t.is_empty() { "Unknown" } else { t };
+    tx.execute(
+        "UPDATE books SET title = ?1, sort = title_sort(?1) WHERE id = ?2",
+        rusqlite::params![t, book_id],
+    )?;
+    Ok(())
+}
+
+// books.author_sort is the authors' own sorts joined with " & ", in link order.
+fn rebuild_author_sort(tx: &Connection, book_id: i64) -> rusqlite::Result<()> {
+    let sorts: Vec<String> = {
+        let mut stmt = tx.prepare(
+            "SELECT a.name, a.sort FROM authors a JOIN books_authors_link l ON l.author = a.id \
+                WHERE l.book = ?1 ORDER BY l.id",
+        )?;
+        let rows = stmt.query_map([book_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (name, sort) = r?;
+            out.push(sort.unwrap_or_else(|| author_sort_for(&name)));
+        }
+        out
+    };
+    tx.execute(
+        "UPDATE books SET author_sort = ?1 WHERE id = ?2",
+        rusqlite::params![sorts.join(" & "), book_id],
+    )?;
+    Ok(())
+}
+
+// After an author is renamed, calibre recomputes the sort of that author's books from the
+// author names, and leaves the author rows' own sort alone. Co-authors who were not renamed
+// keep their stored sort. That mixed case is a guess, not verified against calibre.
+fn rebuild_author_sort_after_rename(tx: &Connection, book_id: i64, renamed: &[i64]) -> rusqlite::Result<()> {
+    let parts: Vec<String> = {
+        let mut stmt = tx.prepare(
+            "SELECT a.id, a.name, a.sort FROM authors a JOIN books_authors_link l ON l.author = a.id \
+                WHERE l.book = ?1 ORDER BY l.id",
+        )?;
+        let rows = stmt.query_map([book_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, name, sort) = r?;
+            if renamed.contains(&id) {
+                out.push(author_sort_for(&name));
+            } else {
+                out.push(sort.unwrap_or_else(|| author_sort_for(&name)));
+            }
+        }
+        out
+    };
+    tx.execute(
+        "UPDATE books SET author_sort = ?1 WHERE id = ?2",
+        rusqlite::params![parts.join(" & "), book_id],
+    )?;
+    Ok(())
+}
+
+// Returns the ids of authors whose name was renamed (capitalization changed).
+fn apply_authors(tx: &Connection, book_id: i64, names: &[String]) -> rusqlite::Result<Vec<i64>> {
+    // Commas are stored as "|", and only "&" separates authors, as in calibre.
+    let mut wanted: Vec<String> = Vec::new();
+    for n in names {
+        let n = n.trim().replace(',', "|");
+        if !n.is_empty() && !wanted.iter().any(|w| w.eq_ignore_ascii_case(&n)) {
+            wanted.push(n);
+        }
+    }
+    if wanted.is_empty() {
+        wanted.push("Unknown".to_string());
+    }
+
+    let old_ids: Vec<i64> = {
+        let mut stmt = tx.prepare("SELECT author FROM books_authors_link WHERE book = ?1 ORDER BY id")?;
+        let rows = stmt.query_map([book_id], |row| row.get::<_, i64>(0))?;
+        let found = rows.collect::<Result<Vec<i64>, _>>()?;
+        found
+    };
+
+    let mut new_ids: Vec<i64> = Vec::new();
+    let mut renamed: Vec<i64> = Vec::new();
+    for name in &wanted {
+        let existing: Option<(i64, String, Option<String>)> = tx
+            .query_row(
+                "SELECT id, name, sort FROM authors WHERE name = ?1 COLLATE NOCASE",
+                [name],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let id = match existing {
+            Some((id, current, _sort)) => {
+                if current != *name {
+                    // Calibre renames the shared row and leaves the author's own sort alone.
+                    tx.execute(
+                        "UPDATE authors SET name = ?1 WHERE id = ?2",
+                        rusqlite::params![name, id],
+                    )?;
+                    renamed.push(id);
+                }
+                id
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO authors (name, sort) VALUES (?1, ?2)",
+                    rusqlite::params![name, author_sort_for(name)],
+                )?;
+                tx.last_insert_rowid()
+            }
+        };
+        if !new_ids.contains(&id) {
+            new_ids.push(id);
+        }
+    }
+
+    if new_ids != old_ids {
+        tx.execute("DELETE FROM books_authors_link WHERE book = ?1", [book_id])?;
+        for id in &new_ids {
+            tx.execute(
+                "INSERT INTO books_authors_link (book, author) VALUES (?1, ?2)",
+                [book_id, *id],
+            )?;
+        }
+        // Calibre drops authors that no book uses anymore.
+        for id in old_ids.iter().filter(|id| !new_ids.contains(id)) {
+            tx.execute(
+                "DELETE FROM authors WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM books_authors_link WHERE author = ?1)",
+                [*id],
+            )?;
+        }
+    }
+
+    rebuild_author_sort(tx, book_id)?;
+    for author_id in &renamed {
+        let books: Vec<i64> = {
+            let mut stmt = tx.prepare("SELECT book FROM books_authors_link WHERE author = ?1")?;
+            let rows = stmt.query_map([*author_id], |row| row.get::<_, i64>(0))?;
+            let found = rows.collect::<Result<Vec<i64>, _>>()?;
+            found
+        };
+        for b in books {
+            rebuild_author_sort_after_rename(tx, b, &renamed)?;
+            touch(tx, b)?;
+        }
+    }
+    Ok(renamed)
+}
+
+// What a book's folder and file names should be, compared with what is stored.
+fn plan_for(tx: &Connection, library_path: &str, book_id: i64) -> rusqlite::Result<BookPlan> {
+    let (title, old_path): (String, String) = tx.query_row(
+        "SELECT title, path FROM books WHERE id = ?1",
+        [book_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let first: Option<String> = tx
+        .query_row(
+            "SELECT a.name FROM authors a JOIN books_authors_link l ON l.author = a.id \
+                WHERE l.book = ?1 ORDER BY l.id LIMIT 1",
+            [book_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let first = first.unwrap_or_else(|| "Unknown".to_string()).replace('|', ",");
+    let new_path = book_dir(library_path, book_id, &title, &first);
+    let base = book_file_base(library_path, &title, &first);
+    let files: Vec<(i64, String, String, String)> = {
+        let mut stmt = tx.prepare("SELECT id, format, name FROM data WHERE book = ?1")?;
+        let rows = stmt.query_map([book_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, base.clone()))
+        })?;
+        let found = rows.collect::<Result<Vec<_>, _>>()?;
+        found
+    };
+    Ok(BookPlan { id: book_id, old_path, new_path, files })
+}
+
+// Never overwrites. A change in capitalization only goes through a temporary name.
+fn move_path(from: &std::path::Path, to: &std::path::Path, log: &mut FsLog) -> Result<(), String> {
+    let case_only = from != to
+    && from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase();
+    if case_only {
+        let mut tmp = from.as_os_str().to_owned();
+        tmp.push(".pandora-tmp");
+        let tmp = PathBuf::from(tmp);
+        std::fs::rename(from, &tmp)
+            .map_err(|e| format!("Could not rename {}: {}", from.display(), e))?;
+        if let Err(e) = std::fs::rename(&tmp, to) {
+            let _ = std::fs::rename(&tmp, from);
+            return Err(format!("Could not rename {}: {}", from.display(), e));
+        }
+    } else {
+        if to.exists() {
+            return Err(format!("{} already exists", to.display()));
+        }
+        std::fs::rename(from, to)
+            .map_err(|e| format!("Could not move {}: {}", from.display(), e))?;
+    }
+    log.moves.push((from.to_path_buf(), to.to_path_buf()));
+    Ok(())
+}
+
+fn fs_steps(lib: &std::path::Path, plans: &[BookPlan], log: &mut FsLog) -> Result<(), String> {
+    // Where each book folder is right now, relative to the library. Starts at the old path.
+    let mut current: Vec<String> = plans.iter().map(|p| p.old_path.clone()).collect();
+
+    // 1. An author folder that only changed capitalization is renamed once, for all its books.
+    let mut renamed_dirs: Vec<String> = Vec::new();
+    for p in plans.iter().filter(|p| !p.old_path.is_empty()) {
+        let old_a = author_dir_of(&p.old_path).to_string();
+        let new_a = author_dir_of(&p.new_path).to_string();
+        if old_a != new_a
+        && old_a.to_lowercase() == new_a.to_lowercase()
+        && !renamed_dirs.contains(&old_a)
+        {
+            let from = lib.join(&old_a);
+            if from.exists() {
+                move_path(&from, &lib.join(&new_a), log)?;
+                renamed_dirs.push(old_a.clone());
+                for c in current.iter_mut() {
+                    if author_dir_of(c) == old_a.as_str() {
+                        let rebased = format!("{}/{}", new_a, title_dir_of(c));
+                        *c = rebased;
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Rename the format files inside each book folder.
+    for (i, p) in plans.iter().enumerate() {
+        if p.old_path.is_empty() {
+            continue;
+        }
+        let dir = lib.join(&current[i]);
+        for (_, format, old_name, new_name) in &p.files {
+            if old_name == new_name {
+                continue;
+            }
+            let ext = format.to_lowercase();
+            let from = dir.join(format!("{}.{}", old_name, ext));
+            let to = dir.join(format!("{}.{}", new_name, ext));
+            if from.exists() {
+                move_path(&from, &to, log)?;
+            }
+        }
+    }
+
+    // 3. Move each book folder to its new location.
+    for (i, p) in plans.iter().enumerate() {
+        if p.old_path.is_empty() || current[i] == p.new_path {
+            continue;
+        }
+        let from = lib.join(&current[i]);
+        if !from.exists() {
+            continue;
+        }
+        let to = lib.join(&p.new_path);
+        if let Some(parent) = to.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Could not create {}: {}", parent.display(), e))?;
+                log.created.push(parent.to_path_buf());
+            }
+        }
+        move_path(&from, &to, log)?;
+        current[i] = p.new_path.clone();
+    }
+
+    // 4. Remove old author folders that are now empty, like calibre does.
+    let mut old_dirs: Vec<String> = plans
+        .iter()
+        .filter(|p| !p.old_path.is_empty())
+        .map(|p| author_dir_of(&p.old_path).to_string())
+        .collect();
+    old_dirs.sort();
+    old_dirs.dedup();
+    for d in old_dirs {
+        if d.is_empty() {
+            continue;
+        }
+        let dir = lib.join(&d);
+        let empty = std::fs::read_dir(&dir).map(|mut r| r.next().is_none()).unwrap_or(false);
+        if empty && std::fs::remove_dir(&dir).is_ok() {
+            log.removed.push(dir);
+        }
+    }
+    Ok(())
+}
+
+fn run_fs_plans(library_path: &str, plans: &[BookPlan]) -> Result<FsLog, String> {
+    let mut log = FsLog::default();
+    match fs_steps(std::path::Path::new(library_path), plans, &mut log) {
+        Ok(()) => Ok(log),
+        Err(e) => {
+            log.undo();
+            Err(e)
+        }
+    }
+}
+
+fn apply_edit(tx: &Connection, library_path: &str, book_id: i64, edit: &MetadataEdit) -> Result<FsLog, String> {
+    db(apply_basic_fields(tx, book_id, edit))?;
+
+    if let Some(title) = &edit.title {
+        db(apply_title(tx, book_id, title))?;
+    }
+    let mut renamed: Vec<i64> = Vec::new();
+    if let Some(names) = &edit.authors {
+        renamed = db(apply_authors(tx, book_id, names))?;
+    }
+
+    // Books whose folder or file names may change: this book, plus every book whose first
+    // author is an author that was just renamed.
+    let mut affected: Vec<i64> = Vec::new();
+    if edit.title.is_some() || edit.authors.is_some() {
+        affected.push(book_id);
+    }
+    for author_id in &renamed {
+        let ids: Vec<i64> = {
+            let mut stmt = db(tx.prepare(
+                "SELECT l.book FROM books_authors_link l WHERE l.author = ?1 \
+                    AND l.id = (SELECT MIN(id) FROM books_authors_link WHERE book = l.book)",
+            ))?;
+            let rows = db(stmt.query_map([*author_id], |row| row.get::<_, i64>(0)))?;
+            let found = db(rows.collect::<Result<Vec<i64>, _>>())?;
+            found
+        };
+        for id in ids {
+            if !affected.contains(&id) {
+                affected.push(id);
+            }
+        }
+    }
+
+    let mut plans: Vec<BookPlan> = Vec::new();
+    for id in &affected {
+        let plan = db(plan_for(tx, library_path, *id))?;
+        if plan.old_path != plan.new_path || plan.files.iter().any(|f| f.2 != f.3) {
+            plans.push(plan);
+        }
+    }
+
+    let log = run_fs_plans(library_path, &plans)?;
+
+    let record = || -> rusqlite::Result<()> {
+        for p in &plans {
+            if p.old_path != p.new_path {
+                tx.execute(
+                    "UPDATE books SET path = ?1 WHERE id = ?2",
+                    rusqlite::params![p.new_path, p.id],
+                )?;
+            }
+            for f in &p.files {
+                if f.2 != f.3 {
+                    tx.execute(
+                        "UPDATE data SET name = ?1 WHERE id = ?2",
+                        rusqlite::params![f.3, f.0],
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    };
+    if let Err(e) = record() {
+        log.undo();
+        return Err(e.to_string());
+    }
+    Ok(log)
+}
+
+// Comments, rating, tags and series, which never touch the disk.
+fn apply_basic_fields(tx: &Connection, book_id: i64, edit: &MetadataEdit) -> rusqlite::Result<()> {
     if let Some(text) = &edit.comments {
         apply_comments(&tx, book_id, text)?;
     }
@@ -233,7 +866,7 @@ pub fn write_metadata(conn: &mut Connection, book_id: i64, edit: &MetadataEdit) 
         "UPDATE books SET last_modified = strftime('%Y-%m-%d %H:%M:%f+00:00', 'now') WHERE id = ?1",
         [book_id],
     )?;
-    tx.commit()
+    Ok(())
 }
 
 // Empty text removes the comments row, which is what calibre does.

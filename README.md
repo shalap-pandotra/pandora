@@ -10,14 +10,26 @@ to browse a library, and no shelling out to calibre's own tools.
 
 ## What this is right now
 
-Pandora is early and read-only. You can point it at an existing calibre
-library and browse it: cover grid, a full metadata preview for the selected
-book (cover, title, series, author, tags, description), and a filter panel
-for authors, series, and tags with live search across all three.
+Pandora is early. You can point it at an existing calibre library (it
+remembers the last one, and Ctrl+O picks a different folder) and browse it:
+cover grid, a full metadata preview for the selected book (cover, title,
+series, author, rating, tags, description), a filter panel for authors,
+series, tags and your own custom columns (dot separated genre hierarchies
+show as a collapsible tree), and live search across titles, authors and
+tags.
 
-Nothing is written back to your library yet. Metadata editing, conversion,
-and a built in reader are all planned but not built. See [roadmap.md](roadmap.md) for the
-full phase by phase plan and current status.
+It can also edit. The Edit metadata dialog changes a book's title, authors,
+series and number, rating, tags and description. Title and author edits
+rename the book's folder and files on disk the way calibre does, and each
+kind of change has been checked by opening the result in calibre. Pandora
+backs up metadata.db before the first save of each session and keeps the
+newest ten backups. Editing is still young, so work on a copy of your
+library and keep your own backup of the folder.
+
+Not built yet: editing the remaining fields (publisher, languages,
+identifiers, dates, cover, custom columns), adding and removing books,
+conversion, and a built in reader. See roadmap.md for the phase by phase
+plan and current status.
 
 ## Why this exists
 
@@ -35,17 +47,16 @@ still open.
 ## Stack
 
 - Tauri, for the native shell and packaging
-- Rust, for the backend: reading and eventually writing metadata.db,
-  resolving covers, and later, format conversion
+- Rust, for the backend: reading and writing metadata.db, renaming book
+  folders and files, resolving covers, and later, format conversion
 - Svelte, for the frontend
 
 ## Status
 
-Phase 1 (read-only browsing) and phase 2 (filter panel, search, and most of
-the intended UI polish) are done. See roadmap.md for what's next, including
-the currently open gap around custom metadata columns (used for genre and
-subgenre hierarchies in many real calibre libraries), which is the next
-thing being picked up.
+Phases 1 and 2 (browsing, filters, search, and the interface polish) are
+done. Phase 3 (metadata editing) is in progress: description, rating, tags,
+series, title and authors can be edited. Next up is editing custom columns
+such as genre. See roadmap.md for the full plan.
 
 ## Building it yourself
 

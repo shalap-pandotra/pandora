@@ -105,13 +105,62 @@ fn backup_once(app: &tauri::AppHandle, state: &State<AppState>) -> Result<(), St
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "library".into());
-    let dest = dir.join(format!("{}-{}.db", name, stamp));
+    let prefix = format!("{}-", name);
+
+    // Existing backups of this library, newest first.
+    let mut existing: Vec<(u64, std::path::PathBuf)> = std::fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            let file = path.file_name()?.to_string_lossy().to_string();
+            let secs = file.strip_prefix(&prefix)?.strip_suffix(".db")?.parse::<u64>().ok()?;
+            Some((secs, path))
+        })
+        .collect();
+    existing.sort_by(|a, b| b.0.cmp(&a.0));
+
+    // Nothing changed since the newest backup, so we already hold this exact state.
+    if let Some((_, newest)) = existing.first() {
+        if files_identical(&src, newest).unwrap_or(false) {
+            *done = true;
+            return Ok(());
+        }
+    }
+
+    let dest = dir.join(format!("{}{}.db", prefix, stamp));
     std::fs::copy(&src, &dest).map_err(|e| e.to_string())?;
     *done = true;
     eprintln!("backup written to {}", dest.display());
+
+    // Keep only the newest few backups of this library.
+    for (_, old) in existing.iter().skip(MAX_BACKUPS - 1) {
+        let _ = std::fs::remove_file(old);
+    }
     Ok(())
 }
 
+const MAX_BACKUPS: usize = 10;
+
+fn files_identical(a: &std::path::Path, b: &std::path::Path) -> std::io::Result<bool> {
+    use std::io::Read;
+    if std::fs::metadata(a)?.len() != std::fs::metadata(b)?.len() {
+        return Ok(false);
+    }
+    let mut fa = std::io::BufReader::new(std::fs::File::open(a)?);
+    let mut fb = std::io::BufReader::new(std::fs::File::open(b)?);
+    let (mut ba, mut bb) = ([0u8; 65536], [0u8; 65536]);
+    loop {
+        let na = fa.read(&mut ba)?;
+        if na == 0 {
+            return Ok(true);
+        }
+        fb.read_exact(&mut bb[..na])?;
+        if ba[..na] != bb[..na] {
+            return Ok(false);
+        }
+    }
+}
 #[tauri::command]
 fn save_metadata(app: tauri::AppHandle, book_id: i64, edit: library::MetadataEdit, state: State<AppState>) -> Result<(), String> {
     if let Some(stars) = edit.rating {
@@ -127,12 +176,43 @@ fn save_metadata(app: tauri::AppHandle, book_id: i64, edit: library::MetadataEdi
     backup_once(&app, &state)?;
     let path = get_path(&state)?;
     let mut conn = library::open_library_rw(&path).map_err(|e| e.to_string())?;
-    library::write_metadata(&mut conn, book_id, &edit).map_err(|e| e.to_string())
+    let moves = library::write_metadata(&mut conn, &path, book_id, &edit)?;
+    log_renames(&app, &path, &moves);
+    Ok(())
 }
 
 #[tauri::command]
 fn get_next_series_index(series: String, state: State<AppState>) -> Result<f64, String> {
     with_conn(&state, |conn| library::next_series_index(conn, &series).map_err(|e| e.to_string()))
+}
+
+fn log_renames(app: &tauri::AppHandle, library: &str, moves: &[(String, String)]) {
+    if moves.is_empty() {
+        return;
+    }
+    let Ok(base) = app.path().app_config_dir() else { return };
+    let dir = base.join("backups");
+    let _ = std::fs::create_dir_all(&dir);
+    let name = std::path::Path::new(library)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "library".into());
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut text = String::new();
+    for (from, to) in moves {
+        text.push_str(&format!("{}\t{}\t{}\n", stamp, from, to));
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(format!("{}-renames.log", name)))
+    {
+        let _ = f.write_all(text.as_bytes());
+    }
 }
 
 fn main() {

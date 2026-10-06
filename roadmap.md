@@ -38,12 +38,28 @@ Status: working end to end against a real calibre library.
       serif display type over a plain sans body, own app icon
 - [x] Renamed from the calibre-zen-inspired working title to Pandora
 - [x] Pushed to a private GitHub repo
+- [x] Library path remembered across restarts, Ctrl+O opens a native
+      folder picker, and the whole app shell shows an empty state before a
+      library is open
+- [x] Collapsible Authors, Series, Tags and custom column sections
+- [x] Authors list virtualized: only the visible rows are rendered, tracked
+      against the sidebar's own scroll position, so the sidebar still
+      scrolls as one piece
+- [x] Review fixes: one read connection held for the whole session, tags
+      folded into the book query, cover paths computed in Rust, comments
+      fetched only for the selected book and sanitized before display,
+      books sorted by calibre's sort field, "|" shown as "," in author
+      names, and dot hierarchy applied only to columns opted in through
+      calibre's categories_using_hierarchy preference
+- Deliberately skipped: tree parent nodes show no aggregated count. An
+  accurate count needs distinct book ids per node, and clicking a parent
+  would then have to filter its whole subtree
 
-Open gap, now researched properly rather than left as a one line note:
-custom metadata columns (built by the user in calibre, not the built in
-tags field) are not read yet. This turned out to be a genuinely larger
-surface than first assumed, worth documenting the research before touching
-any code.
+Custom metadata columns (built by the user in calibre, not the built in
+tags field): the first slice is done, covering multi value text columns.
+This turned out to be a genuinely larger surface than first assumed, so
+the research is documented below, along with what shipped and what is
+deferred.
 
 ### Custom columns research
 
@@ -175,12 +191,95 @@ be named genre.
 
 ## Phase 3: Metadata read and write
 
-- [ ] Editing title, author, tags, series, and so on
-- [ ] Writing back to metadata.db safely, respecting calibre's schema and
-      triggers so a real library does not get corrupted
+Status: in progress. Every item marked done was tested on a copy of a real
+library and then checked by opening that copy in calibre.
+
+- [x] Safety layer: a separate read write connection used only for saving,
+      with calibre's title_sort registered on it, a backup of metadata.db
+      before the first write of a session, and one transaction per save
+- [x] Edit metadata dialog, opened from the preview panel and from the
+      sidebar, which sends only the fields that changed
+- [x] Description, rating, tags, series and series number
+- [x] Title and authors, including renaming the book's folder and files
+- [ ] Publisher, languages, identifiers, published date, and cover
+- [ ] Editing custom columns, starting with multi value text columns such
+      as genre
+- [ ] Add books and remove books (adding needs calibre's uuid4 function)
+- [ ] Restore from a backup, using the rename log to undo folder moves
+- [ ] OPF generation, see the notes below
 - [ ] Careful handling of concurrent access if calibre itself might also be
-      open at the same time
+      open at the same time. For now the rule is to close calibre first
 - No Python needed, native Rust the whole way
+
+### What writing taught us (checked against calibre on a real library)
+
+Triggers. calibre's triggers call only two functions that are not stored
+in the database: title_sort (title updates and both series triggers) and
+uuid4 (inserting a book). Pandora registers title_sort on its write
+connection and will need uuid4 when adding books is built. No trigger
+touches authors, tags, publishers, ratings or comments beyond foreign key
+checks.
+
+Rating. Stored as stars times two (0 to 10), with one shared row per value
+in the ratings table. No link row at all means unrated. The built in
+rating column has no half stars (only custom rating columns can), and
+Pandora shows an odd stored value as whole stars, rounded down.
+
+Tags, series and authors follow one rule. A name is matched ignoring case,
+and using a different capitalization renames the shared row for every book
+that uses it. This was verified in calibre for all three. Rows that no book
+uses anymore are deleted.
+
+Series number. Stored on the book as a number that is never NULL, with a
+default of 1.0. Clearing a series writes 1.0 (every seriesless book in the
+test library was exactly 1.0). Choosing an existing series pre fills the
+next whole number after the highest in that series.
+
+Authors. Only & separates authors, and a comma inside a name is stored as
+|. An existing author keeps its stored sort (it may be hand set), and only a
+brand new author gets a derived one. When an author is renamed, the author's
+own sort is left alone and each book's author_sort is recomputed from the
+new name. As a result a book's author_sort can differ in capitalization
+alone from its authors' sorts joined together, which is harmless. The case
+of a renamed co-author next to one that was not renamed is a guess, not
+verified.
+
+Folders and files. A book lives at {first author}/{title} ({id}), using
+only the first author, so changing a second author moves nothing. Every
+format file shares one base name, {title} - {first author}. The characters
+? " : / < > | * + and \ become _, ".." becomes _, a trailing dot becomes _,
+and non ASCII text is transliterated to ASCII in paths only (names keep
+their Unicode). Names are cut to 36 characters for folder parts and 31 for
+file name parts on Windows (derived from a limit of 40 that shrinks for long
+library paths, believed to be 100 elsewhere, unverified). All of this
+matched calibre exactly across the test library, including accents, Hindi
+and awkward characters. Calibre reads books.path from the database and does
+not recompute it, so a name that differs from calibre's for some script
+(Chinese and Japanese are untested) would only look different, it could not
+make a book unfindable.
+
+Order of operations on a save. The database work is one transaction. Files
+and folders are renamed first, and if anything fails, including the commit,
+every move is undone. A move never overwrites anything, and a rename that
+only changes capitalization goes through a temporary name so it works on
+Windows. Author folders left empty are removed, as calibre does.
+
+Backups. calibre does not copy metadata.db. Its safety net is a
+metadata.opf file in each book folder plus metadata_db_prefs_backup.json in
+the library root, which "Restore database" rebuilds from. Pandora's own
+backups are exact database snapshots in its config folder, taken before the
+first write of a session, skipped when identical to the newest, and limited
+to the newest ten per library. A snapshot cannot undo a rename, so every
+folder and file move is also appended to a rename log next to the backups.
+There is no restore button yet.
+
+OPF files. Pandora does not write metadata.opf yet, so an edit leaves that
+book's OPF out of date until calibre rewrites it (calibre's "queue all
+books for backup" regenerates all of them). This matters only if
+metadata.db is ever rebuilt from OPFs. The decision is to build the full
+standalone version later: generate the whole file from the database, not
+patch the existing one, and verify it with a round trip through calibre's
+Restore database on a scratch copy.
 
 ### Author sort, derived automatically, no separate field
 
@@ -224,10 +323,19 @@ normal usage. This is calibre's own actual convention, not a guess, so
 Pandora should match it rather than trying to be "more correct" and
 diverging from what calibre itself produces.
 
-Open question: the exact suffix list calibre recognizes (Jr., Sr., II
-through some upper bound, possibly PhD, MD, and so on) is not yet pinned
-down. Needs checking against calibre's actual source or more test cases
-before implementation, rather than guessed.
+Resolved: the word lists are calibre's default tweaks (the copy method is
+'comma', plus three lists), confirmed from calibre's published defaults and
+by testing on a real library. Prefixes (Mr, Mrs, Ms, Dr, Prof) are dropped
+from the sort entirely. Suffixes (Jr, Sr, Inc, Ph.D, Phd, MD, M.D, I, II,
+III, IV, Junior, Senior) move to the end. A name containing a "copy word"
+(Agency, Corporation, Company, Co., Council, Committee, Inc., Institute,
+National, Society, Club, Team) is left unchanged, and so is a name that
+already contains a comma. These are only the defaults: calibre keeps the
+user's own tweaks in its config folder, not in metadata.db, so Pandora
+cannot see customized lists. This affects only the sort given to a brand
+new author. The implementation has a unit test over ten cases taken from
+calibre's real output. Not handled: calibre also strips text in brackets
+before sorting, which has not been verified.
 
 Additional confirmed rule, tested directly rather than assumed: if the
 name contains no whitespace at all, author sort is left completely
@@ -271,9 +379,10 @@ Verified test cases:
   "the" in "in the High Castle" is correctly left alone, only the leading
   one moves)
 
-Given how narrow and confirmed this rule is, title sort is a strong
-candidate for the same treatment as author sort: derive it automatically
-on save, do not expose a separate editable field for it either.
+Given how narrow and confirmed this rule is, title sort gets the same
+treatment as author sort: it is derived automatically on save, with no
+separate editable field. This is built, and the derived value matched
+calibre's stored sort on every book in the test library.
 
 ---
 
@@ -309,6 +418,15 @@ already landed in phase 2. What's left:
 Note: this is the point where the project stops being a weekend or months
 scope and becomes a genuinely long term one, format by format.
 
+Design idea for when conversion arrives: build it as a separate worker
+binary tuned for speed (opt-level 3, aggressive inlining), spawned by the
+main app only when sustained work is needed. The main app stays tuned for
+size and instant startup (size optimization, panic set to abort, stripped
+symbols). Both come from the same Rust workspace. The cost is a second
+build target and a small job protocol between the two. Instant startup is a
+size and loading concern, while sustained conversion is a speed concern,
+which is why they pull in opposite directions.
+
 ---
 
 ## Phase 6: Built in reader (EPUB first)
@@ -338,6 +456,26 @@ a few months, not years. Much friendlier than conversion.
 Note: full parity with calibre's format matrix is genuinely multi year
 territory if pursued completely. Treat this phase as open ended and ongoing
 rather than something to finish.
+
+---
+
+## Cleanup backlog
+
+Left over from the code review, none of it blocking:
+
+- [ ] A proper error type instead of stringly typed errors, and splitting
+      main.rs into commands.rs and config.rs. library.rs has also grown
+      large and could split into queries, writes and naming
+- [ ] Filter state owned by the page instead of duplicated in Sidebar
+- [ ] One FilterSection component instead of three near identical blocks
+      for Authors, Series and Tags
+- [ ] Named constants for the panel minimum heights (120 and 280)
+- [ ] Simpler drag code using pointer capture on the resizer itself
+- [ ] Turn the verified naming and sort cases into unit tests (title_sort,
+      folder and file names), the way author sort already is
+- [ ] An intermittent sidebar bug: once, after a title and author edit, the
+      authors list did not show a new author until a restart. It did not
+      reproduce, so it is not understood yet
 
 ---
 
@@ -423,9 +561,11 @@ never a dependency Pandora's main line actually ships on.
    into a new, unproven schema. Point and open compatibility with an
    existing library is the actual adoption path, not a stepping stone to
    be dropped later.
-4. Read-only until phase 3. No writes to a real library until metadata
-   read and write is deliberately built and tested against schema and
-   trigger correctness.
+4. Writing is earned, not assumed. Every write path is tested against a
+   copy of a real library and then checked by opening that copy in
+   calibre. metadata.db is backed up before the first write of a session,
+   each save is one transaction, and a failed save must leave both the
+   database and the disk as they were.
 5. New libraries are calibre schema from birth. Even with no calibre
    install and no existing library to point at, a library created by this
    app uses calibre's own schema (tables, triggers, the Author/Title (id)

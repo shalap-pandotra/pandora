@@ -25,7 +25,13 @@ let columnTrees = $derived(
 $effect(() => {
   void refreshKey;
   if (!libraryLoaded) return;
-  invoke('get_authors').then((r) => authors = r);
+  invoke('get_authors').then((r) => {
+    authors = r;
+    if (activeAuthor !== null && !r.some((a) => a.id === activeAuthor)) {
+      activeAuthor = null;
+      emitFilter();
+    }
+  });
   invoke('get_series').then((r) => {
     series = r;
     if (activeSeries !== null && !r.some((s) => s.id === activeSeries)) {
