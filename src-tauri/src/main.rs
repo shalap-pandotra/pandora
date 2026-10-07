@@ -173,6 +173,18 @@ fn save_metadata(app: tauri::AppHandle, book_id: i64, edit: library::MetadataEdi
             return Err("Series number must be a number".to_string());
         }
     }
+    for d in [&edit.date_added, &edit.published].into_iter().flatten() {
+        if !library::valid_stored_date(d) {
+            return Err("That date isn't valid".to_string());
+        }
+    }
+    if let Some(codes) = &edit.languages {
+        for c in codes {
+            if !library::valid_language_code(c) {
+                return Err(format!("\"{}\" isn't a known language code", c));
+            }
+        }
+    }
     backup_once(&app, &state)?;
     let path = get_path(&state)?;
     let mut conn = library::open_library_rw(&path).map_err(|e| e.to_string())?;
@@ -220,6 +232,11 @@ fn get_custom_editor(book_id: i64, state: State<AppState>) -> Result<Vec<library
     with_conn(&state, |conn| library::custom_editor_data(conn, book_id).map_err(|e| e.to_string()))
 }
 
+#[tauri::command]
+fn get_edit_extras(book_id: i64, state: State<AppState>) -> Result<library::EditExtras, String> {
+    with_conn(&state, |conn| library::edit_extras(conn, book_id).map_err(|e| e.to_string()))
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -239,6 +256,7 @@ fn main() {
             get_next_series_index,
             save_metadata,
             get_custom_editor,
+            get_edit_extras,
             save_last_library_path,
             load_last_library_path
         ])

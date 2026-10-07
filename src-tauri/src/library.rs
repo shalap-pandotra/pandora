@@ -381,6 +381,11 @@ pub struct MetadataEdit {
     pub title: Option<String>,     // None means unchanged
     pub authors: Option<Vec<String>>, // None means unchanged, one entry per author
     pub custom: Option<Vec<CustomEdit>>, // None means unchanged
+    pub publisher: Option<String>,       // None means unchanged, empty clears
+    pub identifiers: Option<Vec<IdentifierEdit>>, // None means unchanged
+    pub languages: Option<Vec<String>>, // three letter codes in order, None means unchanged
+    pub date_added: Option<String>,      // stored form, None means unchanged
+    pub published: Option<String>,       // stored form, None means unchanged
     pub comments: Option<String>, // None means unchanged
     pub rating: Option<i64>,      // None means unchanged, 0 clears, 1 to 5 sets stars
 }
@@ -995,9 +1000,234 @@ fn apply_custom_values(tx: &Connection, book_id: i64, column_id: i64, values: &[
     db(write_custom_values(tx, book_id, id, is_names, values))
 }
 
+#[derive(serde::Deserialize)]
+pub struct IdentifierEdit {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub val: String,
+}
+
+// "YYYY-MM-DD HH:MM:SS+00:00", the form calibre stores dates in. 0101-01-01 means undefined.
+pub fn valid_stored_date(s: &str) -> bool {
+    if !s.is_ascii() || s.len() != 25 || !s.ends_with("+00:00") {
+        return false;
+    }
+    let b = s.as_bytes();
+    let digits = |from: usize, to: usize| b[from..to].iter().all(|c| c.is_ascii_digit());
+    digits(0, 4) && b[4] == b'-' && digits(5, 7) && b[7] == b'-' && digits(8, 10)
+    && b[10] == b' ' && digits(11, 13) && b[13] == b':' && digits(14, 16)
+    && b[16] == b':' && digits(17, 19)
+}
+
+// Same rules as series: match ignoring case, rename the shared row when the capitalization
+// differs, and delete a publisher no book uses anymore.
+fn apply_publisher(conn: &Connection, book_id: i64, name: &str) -> rusqlite::Result<()> {
+    let name = name.trim();
+    let old_id: Option<i64> = conn
+        .query_row("SELECT publisher FROM books_publishers_link WHERE book = ?1", [book_id], |row| row.get(0))
+        .optional()?;
+    if name.is_empty() {
+        conn.execute("DELETE FROM books_publishers_link WHERE book = ?1", [book_id])?;
+    } else {
+        let existing: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT id, name FROM publishers WHERE name = ?1 COLLATE NOCASE",
+                [name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let new_id = match existing {
+            Some((id, current)) => {
+                if current != name {
+                    conn.execute(
+                        "UPDATE publishers SET name = ?1 WHERE id = ?2",
+                        rusqlite::params![name, id],
+                    )?;
+                }
+                id
+            }
+            None => {
+                conn.execute("INSERT INTO publishers (name) VALUES (?1)", [name])?;
+                conn.last_insert_rowid()
+            }
+        };
+        if old_id != Some(new_id) {
+            conn.execute("DELETE FROM books_publishers_link WHERE book = ?1", [book_id])?;
+            conn.execute(
+                "INSERT INTO books_publishers_link (book, publisher) VALUES (?1, ?2)",
+                [book_id, new_id],
+            )?;
+        }
+    }
+    if let Some(old) = old_id {
+        conn.execute(
+            "DELETE FROM publishers WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM books_publishers_link WHERE publisher = ?1)",
+            [old],
+        )?;
+    }
+    Ok(())
+}
+
+// Replaces the book's whole identifier list. One value per type, types lowercased.
+fn apply_identifiers(conn: &Connection, book_id: i64, items: &[IdentifierEdit]) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM identifiers WHERE book = ?1", [book_id])?;
+    let mut seen: Vec<String> = Vec::new();
+    for it in items {
+        let typ = it.kind.trim().to_lowercase();
+        let val = it.val.trim();
+        if typ.is_empty() || val.is_empty() || seen.contains(&typ) {
+            continue;
+        }
+        conn.execute(
+            "INSERT INTO identifiers (book, type, val) VALUES (?1, ?2, ?3)",
+            rusqlite::params![book_id, typ, val],
+        )?;
+        seen.push(typ);
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+pub struct EditExtras {
+    pub identifiers: Vec<(String, String)>,
+    pub publisher: Option<String>,
+    pub publishers: Vec<String>,
+    pub languages: Vec<String>,
+    pub language_options: Vec<LanguageOption>,
+    pub timestamp: String,
+    pub pubdate: String,
+}
+
+pub fn edit_extras(conn: &Connection, book_id: i64) -> rusqlite::Result<EditExtras> {
+    let (timestamp, pubdate): (String, String) = conn.query_row(
+        "SELECT COALESCE(timestamp, ''), COALESCE(pubdate, '') FROM books WHERE id = ?1",
+        [book_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let publisher: Option<String> = conn
+        .query_row(
+            "SELECT p.name FROM publishers p JOIN books_publishers_link l ON l.publisher = p.id WHERE l.book = ?1",
+            [book_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let identifiers = {
+        let mut stmt = conn.prepare("SELECT type, val FROM identifiers WHERE book = ?1 ORDER BY id")?;
+        let rows = stmt.query_map([book_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let found = rows.collect::<Result<Vec<_>, _>>()?;
+        found
+    };
+    let publishers = query_strings(conn, "SELECT name FROM publishers ORDER BY name", rusqlite::params![])?;
+    let languages = query_strings(
+        conn,
+        "SELECT g.lang_code FROM languages g JOIN books_languages_link l ON l.lang_code = g.id \
+            WHERE l.book = ?1 ORDER BY l.item_order",
+        rusqlite::params![book_id],
+    )?;
+    Ok(EditExtras {
+        identifiers,
+        publisher,
+        publishers,
+        timestamp,
+        pubdate,
+        languages,
+        language_options: language_options(),
+    })
+}
+
+#[derive(Serialize)]
+pub struct LanguageOption {
+    pub code: String,
+    pub name: String,
+}
+
+// The common languages (those with a two letter code) and their three letter codes. Calibre
+// writes ISO 639-2/T codes, which match these for every language in this list.
+pub fn language_options() -> Vec<LanguageOption> {
+    let mut out: Vec<LanguageOption> = isolang::languages()
+        .filter(|l| l.to_639_1().is_some())
+        .map(|l| LanguageOption {
+            code: l.to_639_3().to_string(),
+            name: l.to_name().to_string(),
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+pub fn valid_language_code(code: &str) -> bool {
+    isolang::Language::from_639_3(&code.to_lowercase()).is_some()
+}
+
+// Languages are shared rows keyed by their code, and the link table keeps the order.
+fn apply_languages(conn: &Connection, book_id: i64, codes: &[String]) -> rusqlite::Result<()> {
+    let mut wanted: Vec<String> = Vec::new();
+    for c in codes {
+        let c = c.trim().to_lowercase();
+        if !c.is_empty() && !wanted.contains(&c) {
+            wanted.push(c);
+        }
+    }
+    let old_ids: Vec<i64> = {
+        let mut stmt = conn.prepare("SELECT lang_code FROM books_languages_link WHERE book = ?1")?;
+        let rows = stmt.query_map([book_id], |row| row.get::<_, i64>(0))?;
+        let found = rows.collect::<Result<Vec<i64>, _>>()?;
+        found
+    };
+    conn.execute("DELETE FROM books_languages_link WHERE book = ?1", [book_id])?;
+    let mut new_ids: Vec<i64> = Vec::new();
+    for (order, code) in wanted.iter().enumerate() {
+        let existing: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM languages WHERE lang_code = ?1 COLLATE NOCASE",
+                [code],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                conn.execute("INSERT INTO languages (lang_code) VALUES (?1)", [code])?;
+                conn.last_insert_rowid()
+            }
+        };
+        conn.execute(
+            "INSERT INTO books_languages_link (book, lang_code, item_order) VALUES (?1, ?2, ?3)",
+            rusqlite::params![book_id, id, order as i64],
+        )?;
+        new_ids.push(id);
+    }
+    // Same cleanup as tags and series. Whether calibre also drops unused languages is
+    // one of the tests below.
+    for id in old_ids.iter().filter(|id| !new_ids.contains(id)) {
+        conn.execute(
+            "DELETE FROM languages WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM books_languages_link WHERE lang_code = ?1)",
+            [*id],
+        )?;
+    }
+    Ok(())
+}
+
 // Comments, rating, tags and series, which never touch the disk.
 
 fn apply_basic_fields(tx: &Connection, book_id: i64, edit: &MetadataEdit) -> rusqlite::Result<()> {
+    if let Some(name) = &edit.publisher {
+        apply_publisher(tx, book_id, name)?;
+    }
+    if let Some(items) = &edit.identifiers {
+        apply_identifiers(tx, book_id, items)?;
+    }
+    if let Some(codes) = &edit.languages {
+        apply_languages(tx, book_id, codes)?;
+    }
+    if let Some(d) = &edit.date_added {
+        tx.execute("UPDATE books SET timestamp = ?1 WHERE id = ?2", rusqlite::params![d, book_id])?;
+    }
+    if let Some(d) = &edit.published {
+        tx.execute("UPDATE books SET pubdate = ?1 WHERE id = ?2", rusqlite::params![d, book_id])?;
+    }
     if let Some(text) = &edit.comments {
         apply_comments(&tx, book_id, text)?;
     }

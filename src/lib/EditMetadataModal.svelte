@@ -11,6 +11,20 @@ let originalStars = $derived(Math.floor((book.rating ?? 0) / 2));
 let tagsText = $state('');
 let originalTags = [];
 let customCols = $state([]);
+let idsText = $state('');
+let originalIds = '';
+let originalIdKeys = [];
+let publisherText = $state('');
+let originalPublisher = '';
+let publisherNames = $state([]);
+let dateText = $state('');
+let originalDate = '';
+let publishedText = $state('');
+let originalPublished = '';
+let langOptions = $state([]);
+let langCodes = $state([]);
+let originalLangs = [];
+let langInput = $state('');
 let customOpen = $state(false);
 let titleText = $state('');
 let originalTitle = $state('');
@@ -25,6 +39,69 @@ let loaded = $state(false);
 let saving = $state(false);
 let error = $state('');
 let commentsEl = $state();
+
+// Calibre writes dates as UTC text, and "0101-01-01" means undefined. Dates picked in the
+// dialog are stored as local midnight converted to UTC, which is what calibre does.
+function storedToInput(s) {
+  if (!s || s.startsWith('0101-01-01')) return '';
+  const d = new Date(s.replace(' ', 'T').replace(/\.\d+/, ''));
+  if (Number.isNaN(d.getTime())) return '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${String(d.getFullYear()).padStart(4, '0')}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function inputToStored(v) {
+  if (!v) return '0101-01-01 00:00:00+00:00';
+  const [y, m, d] = v.split('-').map(Number);
+  // setFullYear avoids JavaScript treating years 0 to 99 as 1900 to 1999.
+  const local = new Date(2000, 0, 1);
+  local.setFullYear(y, m - 1, d);
+  local.setHours(0, 0, 0, 0);
+  const iso = local.toISOString();
+  return `${iso.slice(0, 10)} ${iso.slice(11, 19)}+00:00`;
+}
+function langName(code) {
+  return langOptions.find((o) => o.code === code)?.name ?? code;
+}
+// Accepts a language name or a three letter code. Returns false if it can't be understood.
+function addLanguage(strict) {
+  const t = langInput.trim().toLowerCase();
+  if (!t) return true;
+  const hit = langOptions.find((o) => o.name.toLowerCase() === t || o.code === t);
+  const code = hit ? hit.code : /^[a-z]{3}$/.test(t) ? t : null;
+  if (!code) {
+    if (strict) error = `"${langInput.trim()}" isn't a language Pandora knows. Pick one from the list or type its three letter code.`;
+    return false;
+  }
+  if (!langCodes.includes(code)) langCodes = [...langCodes, code];
+  langInput = '';
+  error = '';
+  return true;
+}
+function removeLanguage(code) {
+  langCodes = langCodes.filter((c) => c !== code);
+}
+function langKey(e) {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    addLanguage(true);
+  }
+}
+// "type:value" pairs separated by commas. Only the first colon splits, so a value can have colons.
+function parseIds(text) {
+  const items = [];
+  const seen = [];
+  for (const raw of text.split(',')) {
+    const part = raw.trim();
+    if (!part) continue;
+    const i = part.indexOf(':');
+    if (i < 1 || i === part.length - 1) return { error: `"${part}" needs the form type:value` };
+    const type = part.slice(0, i).trim().toLowerCase();
+    if (seen.includes(type)) return { error: `Only one "${type}" identifier is allowed` };
+    seen.push(type);
+    items.push({ type, val: part.slice(i + 1).trim() });
+  }
+  return { items };
+}
 
 function parseList(text, isNames) {
   const out = [];
@@ -140,6 +217,21 @@ $effect(() => {
     originalIndex = book.series ? book.series_index : null;
     seriesIndex = originalIndex ?? 1;
     invoke('get_series').then((r) => (seriesNames = r.map((s) => s.name)));
+    invoke('get_edit_extras', { bookId: book.id }).then((x) => {
+      idsText = x.identifiers.map(([t, v]) => `${t}:${v}`).join(', ');
+      originalIds = idsText;
+      originalIdKeys = x.identifiers.map(([t, v]) => `${t.toLowerCase()}:${v}`);
+      publisherText = x.publisher ?? '';
+      originalPublisher = publisherText;
+      publisherNames = x.publishers;
+      dateText = storedToInput(x.timestamp);
+      originalDate = dateText;
+      publishedText = storedToInput(x.pubdate);
+      originalPublished = publishedText;
+      langOptions = x.language_options;
+      langCodes = x.languages;
+      originalLangs = [...x.languages];
+    });
     invoke('get_custom_editor', { bookId: book.id }).then((cols) => {
       customCols = cols.map((c) => {
         const text = c.values.join(c.is_names ? ' & ' : ', ');
@@ -160,6 +252,21 @@ async function save() {
   if (stars !== originalStars) edit.rating = stars;
 
   if (keyOf(parseTags(tagsText)) !== keyOf(originalTags)) edit.tags = parseTags(tagsText);
+
+  if (publisherText.trim() !== originalPublisher) edit.publisher = publisherText.trim();
+  if (dateText !== originalDate) edit.date_added = inputToStored(dateText);
+  if (publishedText !== originalPublished) edit.published = inputToStored(publishedText);
+  if (langInput.trim() && !addLanguage(true)) return;
+  if (langCodes.join(',') !== originalLangs.join(',')) edit.languages = langCodes;
+  if (idsText !== originalIds) {
+    const parsed = parseIds(idsText);
+    if (parsed.error) {
+      error = parsed.error;
+      return;
+    }
+    const now = parsed.items.map((i) => `${i.type}:${i.val}`);
+    if (keyOf(now) !== keyOf(originalIdKeys)) edit.identifiers = parsed.items;
+  }
 
   // Capitalization counts as a change, because calibre renames the shared value everywhere.
   const customEdits = [];
@@ -253,6 +360,38 @@ function handleKey(e) {
 
         <label for="em-tags">Tags</label>
         <input id="em-tags" bind:value={tagsText} disabled={!loaded} placeholder="Separate tags with commas" />
+
+        <label for="em-ids">Ids</label>
+        <input id="em-ids" bind:value={idsText} disabled={!loaded} placeholder="isbn:9781101489147, doi:10.1000/182" />
+
+        <label for="em-date">Date</label>
+        <div class="row">
+          <input id="em-date" type="date" bind:value={dateText} disabled={!loaded} />
+          <button type="button" class="zen-btn clear-btn" onclick={() => (dateText = '')} disabled={!loaded || dateText === ''}>Clear</button>
+        </div>
+
+        <label for="em-published">Published</label>
+        <div class="row">
+          <input id="em-published" type="date" bind:value={publishedText} disabled={!loaded} />
+          <button type="button" class="zen-btn clear-btn" onclick={() => (publishedText = '')} disabled={!loaded || publishedText === ''}>Clear</button>
+        </div>
+
+        <label for="em-publisher">Publisher</label>
+        <input id="em-publisher" list="em-publisher-list" bind:value={publisherText} disabled={!loaded} placeholder="No publisher" />
+        <datalist id="em-publisher-list">
+          {#each publisherNames as name}<option value={name}></option>{/each}
+        </datalist>
+
+        <label for="em-lang">Languages</label>
+        <div class="lang-box">
+          {#each langCodes as code (code)}
+            <span class="lang-chip">{langName(code)}<button type="button" class="zen-btn lang-x" aria-label="Remove {langName(code)}" onclick={() => removeLanguage(code)}>×</button></span>
+          {/each}
+          <input id="em-lang" list="em-lang-list" bind:value={langInput} disabled={!loaded} placeholder="Add a language" onchange={() => addLanguage(false)} onkeydown={langKey} />
+          <datalist id="em-lang-list">
+            {#each langOptions as o}<option value={o.name}></option>{/each}
+          </datalist>
+        </div>
       </div>
 
       <label for="em-comments">Comments (HTML)</label>
@@ -432,6 +571,21 @@ textarea { font-family: monospace; resize: vertical; }
 }
 .cc-tab:hover, .cc-tab[aria-expanded='true'] { color: var(--zen-panel); }
 .cc-tab:focus-visible { outline: 2px solid var(--zen-red); outline-offset: 2px; }
+.lang-box { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.lang-box input { width: auto; flex: 1 1 140px; }
+.lang-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 3px 4px 3px 9px;
+  border: 1px solid var(--zen-border);
+  border-radius: 2px;
+  background: var(--zen-bg);
+  color: var(--zen-text-secondary);
+}
+.lang-x { font-size: 14px; line-height: 1; padding: 0 5px; color: var(--zen-text-faint); }
+.lang-x:hover { color: var(--zen-red); }
 .error { color: var(--zen-red); font-size: 12px; }
 .rating-row { display: flex; align-items: center; gap: 10px; }
 .rating-stars { display: flex; gap: 2px; }
