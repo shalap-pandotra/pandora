@@ -323,89 +323,98 @@ function handleKey(e) {
 <div class="overlay">
   <div class="shell">
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="edit-title">
-      <h2 id="edit-title">Edit metadata</h2>
-      <div class="grid">
-        <label for="em-title">Title</label>
-        <input id="em-title" bind:value={titleText} disabled={!loaded} />
-        <label for="em-authors">Author(s)</label>
-        <input id="em-authors" bind:value={authorsText} disabled={!loaded} placeholder="Separate authors with &amp;" />
-        <label for="em-series">Series</label>
-        <div class="row">
-          <input id="em-series" list="em-series-list" bind:value={seriesText} onchange={seriesChosen} disabled={!loaded} placeholder="No series" />
-          <datalist id="em-series-list">
-            {#each seriesNames as name}<option value={name}></option>{/each}
-          </datalist>
-          <input class="num" type="number" step="any" aria-label="Series number" bind:value={seriesIndex} disabled={!loaded || seriesText.trim() === ''} />
-        </div>
-        <span class="field-label">Rating</span>
-        <div class="rating-row">
-          <div class="rating-stars" role="group" aria-label="Rating">
-            {#each [1, 2, 3, 4, 5] as n}
-              <button
-                type="button"
-                class="star-btn"
-                aria-label="Set rating to {n} {n === 1 ? 'star' : 'stars'}"
-                aria-pressed={stars === n}
-                disabled={!loaded}
-                onclick={() => (stars = n)}
-              >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill={n <= stars ? 'var(--zen-red)' : 'none'} stroke="var(--zen-red)" stroke-width="1.5">
-                  <path d="M12 2l2.9 6.6 7.1.7-5.4 4.8 1.6 7-6.2-3.7-6.2 3.7 1.6-7-5.4-4.8 7.1-.7z" />
-                </svg>
-              </button>
-            {/each}
+      <div class="dialog-body">
+        <h2 id="edit-title">Edit metadata</h2>
+        <div class="grid">
+          <label for="em-title">Title</label>
+          <input id="em-title" bind:value={titleText} disabled={!loaded} />
+          <label for="em-authors">Author(s)</label>
+          <input id="em-authors" bind:value={authorsText} disabled={!loaded} placeholder="Separate authors with &amp;" />
+          <label for="em-series">Series</label>
+          <div class="row">
+            <input id="em-series" list="em-series-list" bind:value={seriesText} onchange={seriesChosen} disabled={!loaded} placeholder="No series" />
+            <datalist id="em-series-list">
+              {#each seriesNames as name}<option value={name}></option>{/each}
+            </datalist>
+            <input class="num" type="number" step="any" aria-label="Series number" bind:value={seriesIndex} disabled={!loaded || seriesText.trim() === ''} />
           </div>
-          <button type="button" class="zen-btn clear-btn" onclick={() => (stars = 0)} disabled={!loaded || stars === 0}>Clear</button>
-        </div>
+          <span class="field-label">Rating</span>
+          <div class="rating-row">
+            <div class="rating-stars" role="group" aria-label="Rating">
+              {#each [1, 2, 3, 4, 5] as n}
+                <button
+                  type="button"
+                  class="star-btn"
+                  aria-label="Set rating to {n} {n === 1 ? 'star' : 'stars'}"
+                  aria-pressed={stars === n}
+                  disabled={!loaded}
+                  onclick={() => (stars = n)}
+                >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill={n <= stars ? 'var(--zen-red)' : 'none'} stroke="var(--zen-red)" stroke-width="1.5">
+                    <path d="M12 2l2.9 6.6 7.1.7-5.4 4.8 1.6 7-6.2-3.7-6.2 3.7 1.6-7-5.4-4.8 7.1-.7z" />
+                  </svg>
+                </button>
+              {/each}
+            </div>
+            <button type="button" class="zen-btn clear-btn" onclick={() => (stars = 0)} disabled={!loaded || stars === 0}>Clear</button>
+          </div>
 
-        <label for="em-tags">Tags</label>
-        <input id="em-tags" bind:value={tagsText} disabled={!loaded} placeholder="Separate tags with commas" />
+          <label for="em-tags">Tags</label>
+          <input id="em-tags" bind:value={tagsText} disabled={!loaded} placeholder="Separate tags with commas" />
 
-        <label for="em-ids">Ids</label>
-        <input id="em-ids" bind:value={idsText} disabled={!loaded} placeholder="isbn:9781101489147, doi:10.1000/182" />
+          <label for="em-ids">Ids</label>
+          <input id="em-ids" bind:value={idsText} disabled={!loaded} placeholder="isbn:9781101489147, doi:10.1000/182" />
 
-        <label for="em-date">Date</label>
-        <div class="row">
-          <input id="em-date" type="date" bind:value={dateText} disabled={!loaded} />
-          <button type="button" class="zen-btn clear-btn" onclick={() => (dateText = '')} disabled={!loaded || dateText === ''}>Clear</button>
-        </div>
+          <label for="em-date">Date</label>
+          <div class="row">
+            <input id="em-date" type="date" bind:value={dateText} disabled={!loaded} />
+            <button type="button" class="zen-btn clear-btn" onclick={() => (dateText = '')} disabled={!loaded || dateText === ''}>Clear</button>
+          </div>
 
-        <label for="em-published">Published</label>
-        <div class="row">
-          <input id="em-published" type="date" bind:value={publishedText} disabled={!loaded} />
-          <button type="button" class="zen-btn clear-btn" onclick={() => (publishedText = '')} disabled={!loaded || publishedText === ''}>Clear</button>
-        </div>
+          <label for="em-published">Published</label>
+          <div class="row">
+            <input id="em-published" type="date" bind:value={publishedText} disabled={!loaded} />
+            <button type="button" class="zen-btn clear-btn" onclick={() => (publishedText = '')} disabled={!loaded || publishedText === ''}>Clear</button>
+          </div>
 
-        <label for="em-publisher">Publisher</label>
-        <input id="em-publisher" list="em-publisher-list" bind:value={publisherText} disabled={!loaded} placeholder="No publisher" />
-        <datalist id="em-publisher-list">
-          {#each publisherNames as name}<option value={name}></option>{/each}
-        </datalist>
-
-        <label for="em-lang">Languages</label>
-        <div class="lang-box">
-          {#each langCodes as code (code)}
-            <span class="lang-chip">{langName(code)}<button type="button" class="zen-btn lang-x" aria-label="Remove {langName(code)}" onclick={() => removeLanguage(code)}>×</button></span>
-          {/each}
-          <input id="em-lang" list="em-lang-list" bind:value={langInput} disabled={!loaded} placeholder="Add a language" onchange={() => addLanguage(false)} onkeydown={langKey} />
-          <datalist id="em-lang-list">
-            {#each langOptions as o}<option value={o.name}></option>{/each}
+          <label for="em-publisher">Publisher</label>
+          <input id="em-publisher" list="em-publisher-list" bind:value={publisherText} disabled={!loaded} placeholder="No publisher" />
+          <datalist id="em-publisher-list">
+            {#each publisherNames as name}<option value={name}></option>{/each}
           </datalist>
+
+          <label for="em-lang">Languages</label>
+          <div class="lang-box">
+            {#each langCodes as code (code)}
+              <span class="lang-chip">{langName(code)}<button type="button" class="zen-btn lang-x" aria-label="Remove {langName(code)}" onclick={() => removeLanguage(code)}>×</button></span>
+            {/each}
+            <input id="em-lang" list="em-lang-list" bind:value={langInput} disabled={!loaded} placeholder="Add a language" onchange={() => addLanguage(false)} onkeydown={langKey} />
+            <datalist id="em-lang-list">
+              {#each langOptions as o}<option value={o.name}></option>{/each}
+            </datalist>
+          </div>
+        </div>
+
+        <div class="comments-wrap">
+          <label for="em-comments">Comments (HTML)</label>
+          <div class="ta-box">
+            <textarea id="em-comments" bind:this={commentsEl} bind:value={comments} disabled={!loaded}></textarea>
+          </div>
         </div>
       </div>
 
-      <label for="em-comments">Comments (HTML)</label>
-      <textarea id="em-comments" bind:this={commentsEl} bind:value={comments} rows="12" disabled={!loaded}></textarea>
+      <div class="dialog-foot">
 
-      {#if renamesFiles}
-        <div class="hint">Saving will rename this book's folder and files on disk.</div>
-      {/if}
-      {#if error}<div class="error">{error}</div>{/if}
+        {#if renamesFiles}
+          <div class="hint">Saving will rename this book's folder and files on disk.</div>
+        {/if}
+        {#if error}<div class="error">{error}</div>{/if}
 
-      <div class="actions">
-        <!-- disabled until comments have loaded, so we can never save an empty draft over real text -->
-        <button class="zen-btn btn-primary" onclick={save} disabled={!loaded || saving}>OK</button>
-        <button class="zen-btn btn-secondary" onclick={onClose}>Cancel</button>
+        <div class="actions">
+          <!-- disabled until comments have loaded, so we can never save an empty draft over real text -->
+          <button class="zen-btn btn-primary" onclick={save} disabled={!loaded || saving}>OK</button>
+          <button class="zen-btn btn-secondary" onclick={onClose}>Cancel</button>
+        </div>
       </div>
     </div>
 
@@ -473,26 +482,71 @@ function handleKey(e) {
 .shell {
   position: relative;
   display: flex;
-  max-width: calc(100vw - 72px);
-  max-height: 90vh;
+  max-width: calc(100vw - 80px);
   background: var(--zen-panel);
   border: 1px solid var(--zen-border);
   border-radius: 2px;
 }
+
 .dialog {
-  width: min(720px, 92vw);
+  width: min(780px, 92vw);
+  height: min(94vh, 860px);
   flex: 1 1 auto;
   min-width: 0;
-  overflow-y: auto;
-  padding: 24px;
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+}
+.dialog-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 24px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.dialog-foot {
+  flex: none;
+  padding: 8px 24px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.comments-wrap {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ta-box {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 100px;
+}
+.ta-box textarea {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  max-height: 100%;
 }
 
 h2 { margin: 0; font-family: var(--zen-font-serif); font-size: 22px; font-weight: 400; transform: scaleY(1.15); }
 .hint { margin: 0; font-size: 12px; color: var(--zen-text-faint); }
-.grid { display: grid; grid-template-columns: 90px 1fr; gap: 10px 12px; align-items: center; }
+.grid {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 8px 12px;
+  align-items: center;
+}
+.grid > input:not(#em-publisher) { grid-column: 2 / -1; }
+@container (max-width: 560px) {
+  .grid { grid-template-columns: 90px minmax(0, 1fr); }
+  .grid > input:not(#em-publisher) { grid-column: auto; }
+}
 label, .field-label { font-size: 12px; font-weight: 600; color: var(--zen-text-secondary); }
 input, textarea {
   font: inherit;
@@ -506,7 +560,7 @@ input, textarea {
   width: 100%;
 }
 input:disabled, textarea:disabled { background: var(--zen-bg); color: var(--zen-text-faint); }
-textarea { font-family: monospace; resize: vertical; }
+textarea { font-family: monospace; resize: vertical; min-height: 100px; }
 .row { display: flex; gap: 8px; }
 .num { width: 80px; flex: none; }
 .cc-panel {
