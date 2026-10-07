@@ -73,7 +73,9 @@ function handleInput() {
 .grid { display: grid; grid-template-columns: repeat(auto-fill, 78px); gap: 16px; }
 .card { display: flex; flex-direction: column; gap: 6px; border-radius: 8px; padding: 6px; }
 .cover { width: 100%; aspect-ratio: 2/3; border-radius: 2px; box-shadow: 0 3px 8px rgba(27,28,30,0.12); object-fit: cover; }
-.cover.fallback { background: var(--zen-border); }
+.cover.fallback { 
+  background: linear-gradient(160deg, var(--zen-red), #19191B);
+ }
 .title {
   font-size: 11px; color: var(--zen-text-muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

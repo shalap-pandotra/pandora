@@ -117,7 +117,7 @@ let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null)
 }
 .cover-fallback {
   width: 100%; height: 100%;
-  background: linear-gradient(160deg, #2B2D31, #19191B);
+  background: linear-gradient(160deg, var(--zen-red), var(--zen-red-dark));
   display: flex; align-items: flex-end; padding: 28px;
   box-sizing: border-box;
 }
@@ -140,7 +140,7 @@ let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null)
   display: flex; gap: 10px;
   padding-top: 16px;
 }
-.meta h1 { font-family: var(--zen-font-serif); font-size: 32px; font-weight: 600; color: var(--zen-ink); line-height: 1.15; margin: 0; }
+.meta h1 { font-family: var(--zen-font-serif); font-size: 32px; font-weight: 400; transform: scaleY(1.12); color: var(--zen-ink); line-height: 1.15; margin: 0; }
 .stars { display: flex; gap: 3px; }
 .series { font-size: 15px; color: var(--zen-text-muted); margin-top: 6px; }
 .author { font-size: 15px; color: var(--zen-text-secondary); }

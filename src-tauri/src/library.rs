@@ -66,7 +66,7 @@ fn hierarchical_column_labels(conn: &Connection) -> Vec<String> {
 pub fn list_multi_text_columns(conn: &Connection) -> rusqlite::Result<Vec<MultiTextColumn>> {
     let mut col_stmt = conn.prepare(
         "SELECT id, label, name FROM custom_columns
-WHERE datatype = 'text' AND is_multiple = 1"
+WHERE datatype = 'text' AND is_multiple = 1 AND mark_for_delete = 0"
     )?;
 
     let columns: Vec<(i64, String, String)> = col_stmt
@@ -380,6 +380,7 @@ pub struct MetadataEdit {
     pub series_index: Option<f64>, // None means unchanged
     pub title: Option<String>,     // None means unchanged
     pub authors: Option<Vec<String>>, // None means unchanged, one entry per author
+    pub custom: Option<Vec<CustomEdit>>, // None means unchanged
     pub comments: Option<String>, // None means unchanged
     pub rating: Option<i64>,      // None means unchanged, 0 clears, 1 to 5 sets stars
 }
@@ -773,6 +774,11 @@ fn apply_edit(tx: &Connection, library_path: &str, book_id: i64, edit: &Metadata
     if let Some(names) = &edit.authors {
         renamed = db(apply_authors(tx, book_id, names))?;
     }
+    if let Some(custom) = &edit.custom {
+        for c in custom {
+            apply_custom_values(tx, book_id, c.column_id, &c.values)?;
+        }
+    }
 
     // Books whose folder or file names may change: this book, plus every book whose first
     // author is an author that was just renamed.
@@ -833,7 +839,164 @@ fn apply_edit(tx: &Connection, library_path: &str, book_id: i64, edit: &Metadata
     Ok(log)
 }
 
+#[derive(Serialize)]
+pub struct CustomEditorColumn {
+    pub id: i64,
+    pub name: String,
+    pub is_names: bool,
+    pub values: Vec<String>,
+    pub suggestions: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct CustomEdit {
+    pub column_id: i64,
+    pub values: Vec<String>,
+}
+
+// Multi value text columns the user may edit. Skips columns calibre marked as not editable
+// or about to be deleted. Returns (id, name, is_names).
+fn editable_text_columns(conn: &Connection) -> rusqlite::Result<Vec<(i64, String, bool)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, display FROM custom_columns \
+            WHERE datatype = 'text' AND is_multiple = 1 AND mark_for_delete = 0 AND editable = 1 \
+            ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let display: Option<String> = row.get(2)?;
+        let is_names = display
+            .and_then(|d| serde_json::from_str::<serde_json::Value>(&d).ok())
+            .and_then(|v| v.get("is_names").and_then(|b| b.as_bool()))
+            .unwrap_or(false);
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, is_names))
+    })?;
+    let found = rows.collect::<Result<Vec<_>, _>>()?;
+    Ok(found)
+}
+
+fn query_strings(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params, |row| row.get::<_, String>(0))?;
+    let found = rows.collect::<Result<Vec<String>, _>>()?;
+    Ok(found)
+}
+
+// What the edit dialog needs: each editable column, this book's values, and every existing
+// value of that column for suggestions.
+pub fn custom_editor_data(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<CustomEditorColumn>> {
+    let mut out = Vec::new();
+    for (id, name, is_names) in editable_text_columns(conn)? {
+        let mine = query_strings(
+            conn,
+            &format!(
+            "SELECT c.value FROM custom_column_{id} c \
+                JOIN books_custom_column_{id}_link l ON l.value = c.id \
+                WHERE l.book = ?1 ORDER BY l.id"
+        ),
+            rusqlite::params![book_id],
+        )?;
+        let all = query_strings(
+            conn,
+            &format!("SELECT value FROM custom_column_{id} ORDER BY value"),
+            rusqlite::params![],
+        )?;
+        let show = |v: String| if is_names { v.replace('|', ",") } else { v };
+        out.push(CustomEditorColumn {
+            id,
+            name,
+            is_names,
+            values: mine.into_iter().map(&show).collect(),
+            suggestions: all.into_iter().map(&show).collect(),
+        });
+    }
+    Ok(out)
+}
+
+// Same rules as tags: match ignoring case, rename the shared row when the capitalization
+// differs, and delete values no book uses anymore.
+fn write_custom_values(conn: &Connection, book_id: i64, col: i64, is_names: bool, values: &[String]) -> rusqlite::Result<()> {
+    let table = format!("custom_column_{}", col);
+    let link = format!("books_custom_column_{}_link", col);
+
+    let mut wanted: Vec<String> = Vec::new();
+    for v in values {
+        let v = v.trim();
+        let v = if is_names { v.replace(',', "|") } else { v.to_string() };
+        if !v.is_empty() && !wanted.iter().any(|w| w.eq_ignore_ascii_case(&v)) {
+            wanted.push(v);
+        }
+    }
+
+    let old_ids: Vec<i64> = {
+        let mut stmt = conn.prepare(&format!("SELECT value FROM {} WHERE book = ?1", link))?;
+        let rows = stmt.query_map([book_id], |row| row.get::<_, i64>(0))?;
+        let found = rows.collect::<Result<Vec<i64>, _>>()?;
+        found
+    };
+
+    let mut new_ids: Vec<i64> = Vec::new();
+    for name in &wanted {
+        let existing: Option<(i64, String)> = conn
+            .query_row(
+                &format!("SELECT id, value FROM {} WHERE value = ?1 COLLATE NOCASE", table),
+                [name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let id = match existing {
+            Some((id, current)) => {
+                if current != *name {
+                    conn.execute(
+                        &format!("UPDATE {} SET value = ?1 WHERE id = ?2", table),
+                        rusqlite::params![name, id],
+                    )?;
+                }
+                id
+            }
+            None => {
+                conn.execute(&format!("INSERT INTO {} (value) VALUES (?1)", table), [name])?;
+                conn.last_insert_rowid()
+            }
+        };
+        if !new_ids.contains(&id) {
+            new_ids.push(id);
+        }
+    }
+
+    for id in old_ids.iter().filter(|id| !new_ids.contains(id)) {
+        conn.execute(
+            &format!("DELETE FROM {} WHERE book = ?1 AND value = ?2", link),
+            [book_id, *id],
+        )?;
+        conn.execute(
+            &format!(
+                "DELETE FROM {} WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM {} WHERE value = ?1)",
+                table, link
+            ),
+            [*id],
+        )?;
+    }
+    for id in new_ids.iter().filter(|id| !old_ids.contains(id)) {
+        conn.execute(
+            &format!("INSERT INTO {} (book, value) VALUES (?1, ?2)", link),
+            [book_id, *id],
+        )?;
+    }
+    Ok(())
+}
+
+// Refuses any column that isn't an editable multi value text column.
+fn apply_custom_values(tx: &Connection, book_id: i64, column_id: i64, values: &[String]) -> Result<(), String> {
+    let cols = db(editable_text_columns(tx))?;
+    let (id, _name, is_names) = cols
+        .into_iter()
+        .find(|c| c.0 == column_id)
+        .ok_or_else(|| "That custom column can't be edited".to_string())?;
+    db(write_custom_values(tx, book_id, id, is_names, values))
+}
+
 // Comments, rating, tags and series, which never touch the disk.
+
 fn apply_basic_fields(tx: &Connection, book_id: i64, edit: &MetadataEdit) -> rusqlite::Result<()> {
     if let Some(text) = &edit.comments {
         apply_comments(&tx, book_id, text)?;

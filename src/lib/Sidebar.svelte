@@ -46,7 +46,16 @@ $effect(() => {
       emitFilter();
     }
   });
-  invoke('get_multi_text_columns').then((r) => (multiTextColumns = r));
+  invoke('get_multi_text_columns').then((r) => {
+    multiTextColumns = r;
+    if (activeCustomValue !== null) {
+      const col = r.find((c) => c.id === activeCustomValue.columnId);
+      if (!col || !col.values.some((v) => v.id === activeCustomValue.valueId)) {
+        activeCustomValue = null;
+        emitFilter();
+      }
+    }
+  });
 });
 
 function buildTree(values, hierarchical) {

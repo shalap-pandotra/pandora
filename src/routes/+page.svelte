@@ -224,7 +224,7 @@ async function openLibrary() {
 {#if editingBook}
   <EditMetadataModal book={editingBook} onClose={() => (editingBook = null)} onSaved={handleSaved} />
 {/if}
-<div class="frame">
+<div class="frame" inert={editingBook != null}>
   <TopBar />
   <div class="body-row">
     <Sidebar onFilterChange={handleFilterChange} onReset={handleReset} libraryLoaded={libraryLoaded} onEditMetadata={openEditor} refreshKey={sidebarVersion} />

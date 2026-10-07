@@ -215,6 +215,11 @@ fn log_renames(app: &tauri::AppHandle, library: &str, moves: &[(String, String)]
     }
 }
 
+#[tauri::command]
+fn get_custom_editor(book_id: i64, state: State<AppState>) -> Result<Vec<library::CustomEditorColumn>, String> {
+    with_conn(&state, |conn| library::custom_editor_data(conn, book_id).map_err(|e| e.to_string()))
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -233,6 +238,7 @@ fn main() {
             get_comments,
             get_next_series_index,
             save_metadata,
+            get_custom_editor,
             save_last_library_path,
             load_last_library_path
         ])

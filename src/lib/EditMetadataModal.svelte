@@ -1,5 +1,6 @@
 <script>
 import { invoke } from '@tauri-apps/api/core';
+import { tick } from 'svelte';
 
 let { book, onClose, onSaved } = $props();
 
@@ -9,6 +10,8 @@ let stars = $state(0);
 let originalStars = $derived(Math.floor((book.rating ?? 0) / 2));
 let tagsText = $state('');
 let originalTags = [];
+let customCols = $state([]);
+let customOpen = $state(false);
 let titleText = $state('');
 let originalTitle = $state('');
 let authorsText = $state('');
@@ -22,6 +25,72 @@ let loaded = $state(false);
 let saving = $state(false);
 let error = $state('');
 let commentsEl = $state();
+
+function parseList(text, isNames) {
+  const out = [];
+  for (const raw of text.split(isNames ? '&' : ',')) {
+    const v = raw.trim();
+    if (v && !out.some((o) => o.toLowerCase() === v.toLowerCase())) out.push(v);
+  }
+  return out;
+}
+// Existing values that match what is being typed after the last separator.
+function suggestionsFor(col) {
+  const fragment = col.text.split(col.is_names ? '&' : ',').pop().trim().toLowerCase();
+  const chosen = parseList(col.text, col.is_names).map((v) => v.toLowerCase());
+  return col.suggestions
+    .filter((s) => !chosen.includes(s.toLowerCase()) && s.toLowerCase().includes(fragment))
+    .slice(0, 50);
+}
+function pickSuggestion(col, value) {
+  const sep = col.is_names ? ' & ' : ', ';
+  const head = col.text
+  .split(col.is_names ? '&' : ',')
+  .slice(0, -1)
+  .map((p) => p.trim())
+  .filter((p) => p !== '');
+  col.text = [...head, value].join(sep) + sep;
+}
+
+function optionId(col, i) {
+  return `cc-opt-${col.id}-${i}`;
+}
+async function moveHighlight(col, delta) {
+  const count = suggestionsFor(col).length;
+  if (!count) return;
+  col.open = true;
+  const current = Math.min(col.hi, count - 1);
+  col.hi = Math.max(-1, Math.min(current + delta, count - 1));
+  if (col.hi < 0) return;
+  await tick();
+  document.getElementById(optionId(col, col.hi))?.scrollIntoView({ block: 'nearest' });
+}
+function customKey(e, col) {
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (!col.open) {
+      col.open = true;
+      col.hi = 0;
+    } else {
+      moveHighlight(col, 1);
+    }
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    moveHighlight(col, -1);
+  } else if (e.key === 'Enter') {
+    // Only picks something you actively highlighted, so a typed value is never replaced.
+    const list = suggestionsFor(col);
+    if (col.open && col.hi >= 0 && list[col.hi]) {
+      e.preventDefault();
+      pickSuggestion(col, list[col.hi]);
+      col.hi = -1;
+    }
+  } else if (e.key === 'Escape' && col.open) {
+    // Closes the list first. The dialog only closes on a second Escape.
+    e.stopPropagation();
+    col.open = false;
+  }
+}
 
 // Only "&" separates authors. A comma inside a name belongs to that name.
 function parseAuthors(text) {
@@ -71,6 +140,12 @@ $effect(() => {
     originalIndex = book.series ? book.series_index : null;
     seriesIndex = originalIndex ?? 1;
     invoke('get_series').then((r) => (seriesNames = r.map((s) => s.name)));
+    invoke('get_custom_editor', { bookId: book.id }).then((cols) => {
+      customCols = cols.map((c) => {
+        const text = c.values.join(c.is_names ? ' & ' : ', ');
+        return { ...c, text, original: text, open: false, hi: -1 };
+      });
+    });
     loaded = true;
   });
 });
@@ -83,7 +158,18 @@ async function save() {
   const edit = {};
   if (comments !== originalComments) edit.comments = comments;
   if (stars !== originalStars) edit.rating = stars;
+
   if (keyOf(parseTags(tagsText)) !== keyOf(originalTags)) edit.tags = parseTags(tagsText);
+
+  // Capitalization counts as a change, because calibre renames the shared value everywhere.
+  const customEdits = [];
+  for (const col of customCols) {
+    const now = parseList(col.text, col.is_names);
+    if (keyOf(now) !== keyOf(parseList(col.original, col.is_names))) {
+      customEdits.push({ column_id: col.id, values: now });
+    }
+  }
+  if (customEdits.length) edit.custom = customEdits;
 
   // Capitalization counts as a change here too, since it renames the folder and files.
   const newTitle = titleText.trim();
@@ -117,68 +203,120 @@ async function save() {
 }
 
 function handleKey(e) {
-  if (e.key === 'Escape') onClose();
+  if (e.key === 'Escape') {
+    // Collapse the custom panel first. The dialog closes on the next press.
+    if (customOpen) customOpen = false;
+      else onClose();
+  }
 }
 </script>
 
 <svelte:window onkeydown={handleKey} />
 
 <div class="overlay">
-  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="edit-title">
-    <h2 id="edit-title">Edit metadata</h2>
-    <p class="hint">Greyed out fields can't be edited yet. They arrive in later updates.</p>
+  <div class="shell">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="edit-title">
+      <h2 id="edit-title">Edit metadata</h2>
+      <div class="grid">
+        <label for="em-title">Title</label>
+        <input id="em-title" bind:value={titleText} disabled={!loaded} />
+        <label for="em-authors">Author(s)</label>
+        <input id="em-authors" bind:value={authorsText} disabled={!loaded} placeholder="Separate authors with &amp;" />
+        <label for="em-series">Series</label>
+        <div class="row">
+          <input id="em-series" list="em-series-list" bind:value={seriesText} onchange={seriesChosen} disabled={!loaded} placeholder="No series" />
+          <datalist id="em-series-list">
+            {#each seriesNames as name}<option value={name}></option>{/each}
+          </datalist>
+          <input class="num" type="number" step="any" aria-label="Series number" bind:value={seriesIndex} disabled={!loaded || seriesText.trim() === ''} />
+        </div>
+        <span class="field-label">Rating</span>
+        <div class="rating-row">
+          <div class="rating-stars" role="group" aria-label="Rating">
+            {#each [1, 2, 3, 4, 5] as n}
+              <button
+                type="button"
+                class="star-btn"
+                aria-label="Set rating to {n} {n === 1 ? 'star' : 'stars'}"
+                aria-pressed={stars === n}
+                disabled={!loaded}
+                onclick={() => (stars = n)}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill={n <= stars ? 'var(--zen-red)' : 'none'} stroke="var(--zen-red)" stroke-width="1.5">
+                  <path d="M12 2l2.9 6.6 7.1.7-5.4 4.8 1.6 7-6.2-3.7-6.2 3.7 1.6-7-5.4-4.8 7.1-.7z" />
+                </svg>
+              </button>
+            {/each}
+          </div>
+          <button type="button" class="zen-btn clear-btn" onclick={() => (stars = 0)} disabled={!loaded || stars === 0}>Clear</button>
+        </div>
 
-    <div class="grid">
-      <label for="em-title">Title</label>
-      <input id="em-title" bind:value={titleText} disabled={!loaded} />
-      <label for="em-authors">Author(s)</label>
-      <input id="em-authors" bind:value={authorsText} disabled={!loaded} placeholder="Separate authors with &amp;" />
-      <label for="em-series">Series</label>
-      <div class="row">
-        <input id="em-series" list="em-series-list" bind:value={seriesText} onchange={seriesChosen} disabled={!loaded} placeholder="No series" />
-        <datalist id="em-series-list">
-          {#each seriesNames as name}<option value={name}></option>{/each}
-        </datalist>
-        <input class="num" type="number" step="any" aria-label="Series number" bind:value={seriesIndex} disabled={!loaded || seriesText.trim() === ''} />
+        <label for="em-tags">Tags</label>
+        <input id="em-tags" bind:value={tagsText} disabled={!loaded} placeholder="Separate tags with commas" />
       </div>
-      <span class="field-label">Rating</span>
-      <div class="rating-row">
-        <div class="rating-stars" role="group" aria-label="Rating">
-          {#each [1, 2, 3, 4, 5] as n}
-            <button
-              type="button"
-              class="star-btn"
-              aria-label="Set rating to {n} {n === 1 ? 'star' : 'stars'}"
-              aria-pressed={stars === n}
-              disabled={!loaded}
-              onclick={() => (stars = n)}
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill={n <= stars ? 'var(--zen-red)' : 'none'} stroke="var(--zen-red)" stroke-width="1.5">
-                <path d="M12 2l2.9 6.6 7.1.7-5.4 4.8 1.6 7-6.2-3.7-6.2 3.7 1.6-7-5.4-4.8 7.1-.7z" />
-              </svg>
-            </button>
+
+      <label for="em-comments">Comments (HTML)</label>
+      <textarea id="em-comments" bind:this={commentsEl} bind:value={comments} rows="12" disabled={!loaded}></textarea>
+
+      {#if renamesFiles}
+        <div class="hint">Saving will rename this book's folder and files on disk.</div>
+      {/if}
+      {#if error}<div class="error">{error}</div>{/if}
+
+      <div class="actions">
+        <!-- disabled until comments have loaded, so we can never save an empty draft over real text -->
+        <button class="zen-btn btn-primary" onclick={save} disabled={!loaded || saving}>OK</button>
+        <button class="zen-btn btn-secondary" onclick={onClose}>Cancel</button>
+      </div>
+    </div>
+
+    {#if customCols.length}
+      <div id="cc-panel" class="cc-panel" class:open={customOpen} inert={!customOpen}>
+        <div class="cc-inner">
+          <h3>Custom metadata</h3>
+          {#each customCols as col (col.id)}
+            {@const list = suggestionsFor(col)}
+            <div class="cc-item">
+              <label for="em-cc-{col.id}">{col.name}</label>
+              <div class="cc-box">
+                <input
+                  id="em-cc-{col.id}"
+                  role="combobox"
+                  aria-expanded={col.open && list.length > 0}
+                  aria-controls="cc-list-{col.id}"
+                  aria-autocomplete="list"
+                  autocomplete="off"
+                  bind:value={col.text}
+                  disabled={!loaded}
+                  placeholder={col.is_names ? 'Separate with &' : 'Separate with commas'}
+                  onfocus={() => { col.open = true; col.hi = -1; }}
+                  oninput={() => { col.open = true; col.hi = -1; }}
+                  onblur={() => (col.open = false)}
+                  onkeydown={(e) => customKey(e, col)}
+                />
+                {#if col.open && list.length}
+                  <div class="cc-list" id="cc-list-{col.id}" role="listbox" tabindex="-1" onmousedown={(e) => e.preventDefault()}>
+                    {#each list as s, i}
+                      <div
+                        id={optionId(col, i)}
+                        class="cc-opt"
+                        class:hi={i === col.hi}
+                        role="option"
+                        aria-selected={i === col.hi}
+                        tabindex="-1"
+                        onmousedown={(e) => { e.preventDefault(); pickSuggestion(col, s); col.hi = -1; }}
+                        onmouseenter={() => (col.hi = i)}
+                      >{s}</div>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            </div>
           {/each}
         </div>
-        <button type="button" class="zen-btn clear-btn" onclick={() => (stars = 0)} disabled={!loaded || stars === 0}>Clear</button>
       </div>
-
-      <label for="em-tags">Tags</label>
-      <input id="em-tags" bind:value={tagsText} disabled={!loaded} placeholder="Separate tags with commas" />
-    </div>
-
-    <label for="em-comments">Comments (HTML)</label>
-    <textarea id="em-comments" bind:this={commentsEl} bind:value={comments} rows="12" disabled={!loaded}></textarea>
-
-    {#if renamesFiles}
-      <div class="hint">Saving will rename this book's folder and files on disk.</div>
+      <button type="button" class="cc-tab" aria-expanded={customOpen} aria-controls="cc-panel" onclick={() => (customOpen = !customOpen)}>Custom</button>
     {/if}
-    {#if error}<div class="error">{error}</div>{/if}
-
-    <div class="actions">
-      <!-- disabled until comments have loaded, so we can never save an empty draft over real text -->
-      <button class="zen-btn btn-primary" onclick={save} disabled={!loaded || saving}>OK</button>
-      <button class="zen-btn btn-secondary" onclick={onClose}>Cancel</button>
-    </div>
   </div>
 </div>
 
@@ -192,19 +330,28 @@ function handleKey(e) {
   justify-content: center;
   z-index: 100;
 }
-.dialog {
-  width: min(720px, 92vw);
+
+.shell {
+  position: relative;
+  display: flex;
+  max-width: calc(100vw - 72px);
   max-height: 90vh;
-  overflow-y: auto;
   background: var(--zen-panel);
   border: 1px solid var(--zen-border);
   border-radius: 2px;
+}
+.dialog {
+  width: min(720px, 92vw);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-y: auto;
   padding: 24px;
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
-h2 { margin: 0; font-family: var(--zen-font-serif); font-size: 22px; }
+
+h2 { margin: 0; font-family: var(--zen-font-serif); font-size: 22px; font-weight: 400; transform: scaleY(1.15); }
 .hint { margin: 0; font-size: 12px; color: var(--zen-text-faint); }
 .grid { display: grid; grid-template-columns: 90px 1fr; gap: 10px 12px; align-items: center; }
 label, .field-label { font-size: 12px; font-weight: 600; color: var(--zen-text-secondary); }
@@ -223,6 +370,68 @@ input:disabled, textarea:disabled { background: var(--zen-bg); color: var(--zen-
 textarea { font-family: monospace; resize: vertical; }
 .row { display: flex; gap: 8px; }
 .num { width: 80px; flex: none; }
+.cc-panel {
+  flex: none;
+  display: flex;
+  width: 0;
+  overflow: hidden;
+  transition: width 90ms ease;
+}
+.cc-panel.open { width: 340px; }
+.cc-inner {
+  flex: none;
+  width: 340px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  padding: 24px;
+  border-left: 1px solid var(--zen-border);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.cc-inner h3 {
+  margin: 0 0 4px;
+  font-family: var(--zen-font-serif);
+  font-size: 17px;
+  font-weight: 400;
+  transform: scaleY(1.13);
+  transform-origin: left top;
+}
+.cc-item { display: flex; flex-direction: column; gap: 6px; }
+.cc-box { position: relative; }
+.cc-list {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--zen-panel);
+  border: 1px solid var(--zen-border);
+  border-radius: 2px;
+  box-shadow: 0 6px 16px rgba(28, 27, 24, 0.12);
+  z-index: 5;
+}
+.cc-opt { padding: 6px 10px; font-size: 13px; color: var(--zen-text-secondary); cursor: pointer; }
+.cc-opt.hi { background: #F7C7CE; color: var(--zen-red); }
+.cc-tab {
+  position: absolute;
+  top: 28px;
+  left: 100%;
+  writing-mode: vertical-rl;
+  padding: 14px 7px;
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--zen-panel);
+  background: var(--zen-red);
+  border: 1px solid var(--zen-red-dark);
+  border-left: none;
+  border-radius: 0 2px 2px 0;
+  cursor: pointer;
+}
+.cc-tab:hover, .cc-tab[aria-expanded='true'] { color: var(--zen-panel); }
+.cc-tab:focus-visible { outline: 2px solid var(--zen-red); outline-offset: 2px; }
 .error { color: var(--zen-red); font-size: 12px; }
 .rating-row { display: flex; align-items: center; gap: 10px; }
 .rating-stars { display: flex; gap: 2px; }
