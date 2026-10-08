@@ -27,11 +27,11 @@ function handleInput() {
   <div class="grid">
     {#each books as book (book.id)}
       <button type="button" class="zen-btn zen-card card" onclick={() => onSelectBook?.(book)}>
-{#if book.cover_path}
-  <img class="cover" src={convertFileSrc(book.cover_path)} alt={book.title} loading="lazy" />
-{:else}
-  <div class="cover fallback"></div>
-{/if}
+        {#if book.cover_path}
+          <img class="cover" src={convertFileSrc(book.cover_path) + '?v=' + book.cover_version} alt={book.title} loading="lazy" />
+        {:else}
+          <div class="cover fallback"></div>
+        {/if}
         <div class="title">{book.title}</div>
       </button>
     {/each}
@@ -74,8 +74,8 @@ function handleInput() {
 .card { display: flex; flex-direction: column; gap: 6px; border-radius: 8px; padding: 6px; }
 .cover { width: 100%; aspect-ratio: 2/3; border-radius: 2px; box-shadow: 0 3px 8px rgba(27,28,30,0.12); object-fit: cover; }
 .cover.fallback { 
-  background: linear-gradient(160deg, var(--zen-red), #19191B);
- }
+  background: var(--zen-red-dark);
+}
 .title {
   font-size: 11px; color: var(--zen-text-muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

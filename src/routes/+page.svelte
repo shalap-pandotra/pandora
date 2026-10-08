@@ -9,12 +9,19 @@ import EditMetadataModal from '../lib/EditMetadataModal.svelte';
 import BookList from '../lib/BookList.svelte';
 import StatusBar from '../lib/StatusBar.svelte';
 import { open } from '@tauri-apps/plugin-dialog';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 let libraryPath = $state('');
 let libraryLoaded = $state(false);
 let books = $state([]);
 let selectedBook = $state(null);
-let editingBook = $state(null);
+let sessionBooks = $state([]);
+let editIndex = $state(-1);
+let staged = $state([]);
+let sessionUi = $state({ customOpen: false, coverOpen: false });
+let sessionError = $state('');
+let quitRequest = $state(0);
+let editingBook = $derived(editIndex >= 0 ? sessionBooks[editIndex] : null);
 let sidebarVersion = $state(0);
 let searchTerm = $state('');
 let currentFilter = $state({ author_id: null, series_id: null, tag_id: null, search: null, custom_column_id: null, custom_value_id: null });
@@ -79,6 +86,18 @@ onMount(() => {
   }
   window.addEventListener('keydown', handleKeydown);
 
+  // Closing the window (Alt+F4 or the close button) while an editing session is open goes
+  // through the dialog, which asks first if anything would be lost.
+  let unlistenClose;
+  getCurrentWindow()
+    .onCloseRequested((event) => {
+      if (editIndex >= 0) {
+        event.preventDefault();
+        quitRequest += 1;
+      }
+    })
+    .then((fn) => (unlistenClose = fn));
+
   invoke('load_last_library_path').then((savedPath) => {
     if (savedPath) {
       libraryPath = savedPath;
@@ -89,6 +108,7 @@ onMount(() => {
   return () => {
     document.removeEventListener('scroll', handleScroll, true);
     window.removeEventListener('keydown', handleKeydown);
+    unlistenClose?.();
   };
 });
 
@@ -134,13 +154,69 @@ function handleReset() {
 }
 
 function openEditor() {
-  if (selectedBook) editingBook = selectedBook;
+  if (!selectedBook) return;
+  sessionBooks = books.slice();
+  editIndex = Math.max(0, sessionBooks.findIndex((b) => b.id === selectedBook.id));
+  staged = [];
+  sessionUi = { customOpen: false, coverOpen: false };
+  sessionError = '';
 }
 
-async function handleSaved(id) {
-  editingBook = null;
+function quitApp() {
+  getCurrentWindow().destroy();
+}
+
+function closeEditor() {
+  editIndex = -1;
+  sessionBooks = [];
+  staged = [];
+  sessionError = '';
+}
+
+// A book with no changes is not staged, and one that was reverted drops out again.
+function upsertStaged(id, entry) {
+  const at = staged.findIndex((s) => s.id === id);
+  if (Object.keys(entry.edit).length === 0) {
+    if (at >= 0) staged.splice(at, 1);
+    return;
+  }
+  const next = { id, edit: entry.edit, draft: entry.draft };
+  if (at >= 0) staged[at] = next;
+    else staged.push(next);
+}
+
+function handleNavigate(delta, entry, ui) {
+  upsertStaged(editingBook.id, entry);
+  sessionUi = ui;
+  sessionError = '';
+  const next = editIndex + delta;
+  if (next >= 0 && next < sessionBooks.length) editIndex = next;
+}
+
+async function handleSave(entry) {
+  const current = editingBook.id;
+  upsertStaged(current, entry);
+  const items = staged.map((s) => ({ book_id: s.id, edit: s.edit }));
+  if (items.length === 0) {
+    closeEditor();
+    return;
+  }
+  try {
+    await invoke('save_metadata_batch', { items });
+  } catch (e) {
+    const message = e?.message ?? String(e);
+    const at = e?.book_id != null ? sessionBooks.findIndex((b) => b.id === e.book_id) : -1;
+    if (at >= 0 && at !== editIndex) {
+      // Nothing was saved. Jump to the book that failed, so the error is shown next to it.
+      sessionError = message;
+      editIndex = at;
+      return;
+    }
+    throw new Error(message);
+  }
+  closeEditor();
   sidebarVersion += 1;
-  await refreshBooks(id);
+  await refreshBooks(current);
 }
 
 function handleSelectBook(book) {
@@ -222,7 +298,21 @@ async function openLibrary() {
 </script>
 
 {#if editingBook}
-  <EditMetadataModal book={editingBook} onClose={() => (editingBook = null)} onSaved={handleSaved} />
+  {#key editingBook.id}
+    <EditMetadataModal
+      book={editingBook}
+      draft={staged.find((s) => s.id === editingBook.id)?.draft ?? null}
+      ui={sessionUi}
+      startError={sessionError}
+      position={{ n: editIndex + 1, total: sessionBooks.length }}
+      stagedElsewhere={staged.filter((s) => s.id !== editingBook.id).length}
+      onNavigate={handleNavigate}
+      onSave={handleSave}
+      onClose={closeEditor}
+      {quitRequest}
+      onQuit={quitApp}
+    />
+  {/key}
 {/if}
 <div class="frame" inert={editingBook != null}>
   <TopBar />

@@ -21,7 +21,7 @@ let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null)
   {#if book}
     <div class="big-cover">
       {#if book.cover_path}
-        <img class="cover-img" src={convertFileSrc(book.cover_path)} alt={book.title} />
+        <img class="cover-img" src={convertFileSrc(book.cover_path) + '?v=' + book.cover_version} alt={book.title} />
       {:else}
         <div class="cover-fallback">
           <span>{book.title}</span>
@@ -96,7 +96,7 @@ let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null)
 .preview {
   flex: 1 1 auto; min-height: 0;
   border: 1px solid var(--zen-border); 
-  border-top-left-radius: 4px;
+  border-radius: 2px 0 0 2px;
   background: var(--zen-panel);
   display: flex; gap: 32px; padding: 32px; overflow: hidden;
 }
@@ -117,13 +117,16 @@ let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null)
 }
 .cover-fallback {
   width: 100%; height: 100%;
-  background: linear-gradient(160deg, var(--zen-red), var(--zen-red-dark));
+  background: var(--zen-red-dark);
   display: flex; align-items: flex-end; padding: 28px;
   box-sizing: border-box;
 }
 .cover-fallback span {
-  font-family: var(--zen-font-serif); font-size: 26px; font-weight: 500;
+  font-family: var(--zen-font-serif); font-size: 16px; font-weight: 400;
   color: #F5F5F6; line-height: 1.25;
+  transform: scaleY(2.23);
+  overflow: hidden;
+  transform-origin: left bottom;
 }
 .meta {
   flex: 1; min-width: 0;
@@ -140,7 +143,7 @@ let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null)
   display: flex; gap: 10px;
   padding-top: 16px;
 }
-.meta h1 { font-family: var(--zen-font-serif); font-size: 32px; font-weight: 400; transform: scaleY(1.12); color: var(--zen-ink); line-height: 1.15; margin: 0; }
+.meta h1 { font-family: var(--zen-font-serif); font-size: 32px; font-weight: 400; transform: scaleY(1.15); color: var(--zen-ink); line-height: 1.15; margin: 0; }
 .stars { display: flex; gap: 3px; }
 .series { font-size: 15px; color: var(--zen-text-muted); margin-top: 6px; }
 .author { font-size: 15px; color: var(--zen-text-secondary); }

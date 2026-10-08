@@ -1,11 +1,11 @@
 <script>
-  import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
-  const appWindow = getCurrentWindow();
+const appWindow = getCurrentWindow();
 
-  function minimize() { appWindow.minimize(); }
-  function toggleMaximize() { appWindow.toggleMaximize(); }
-  function close() { appWindow.close(); }
+function minimize() { appWindow.minimize(); }
+function toggleMaximize() { appWindow.toggleMaximize(); }
+function close() { appWindow.close(); }
 </script>
 
 <div class="topbar">
@@ -37,18 +37,29 @@
   font-size:22px;
   transform: scaleY(2.23);
 }
-  .topbar {
-    height: 64px; flex: none; display: flex; background: var(--zen-bg);
-    cursor: default;
-    user-select: none;
-  }
-  .brand {
-    width: 248px; box-sizing: border-box; flex: none;
-    display: flex; align-items: center; padding: 0 20px;
-    font-family: var(--zen-font-serif); font-weight: 600; font-size: 20px;
-    letter-spacing: -0.01em;
-  }
-  .topbar-right { flex: 1; display: flex; align-items: center; justify-content: flex-end; gap: 20px; padding: 0 20px; }
-  .winctrls { display: flex; background: var(--zen-panel); border: 1px solid var(--zen-border); border-radius: 8px; overflow: hidden; }
-  .winctrls button { width: 38px; height: 38px; display: flex; align-items: center; justify-content: center; color: var(--zen-text-secondary); }
+.topbar {
+  height: 64px; flex: none; display: flex; background: var(--zen-bg);
+  cursor: default;
+  user-select: none;
+}
+.brand {
+  width: 248px; box-sizing: border-box; flex: none;
+  display: flex; align-items: center; padding: 0 20px;
+  font-family: var(--zen-font-serif); font-weight: 600; font-size: 20px;
+  letter-spacing: -0.01em;
+}
+.topbar-right { flex: 1; display: flex; align-items: center; justify-content: flex-end; gap: 20px; padding: 0 20px; }
+.winctrls { display: flex; background: var(--zen-panel); border: 1px solid var(--zen-border); border-radius: 2px; overflow: hidden; }
+
+.winctrls button { position: relative; width: 38px; height: 38px; display: flex; align-items: center; justify-content: center; color: var(--zen-text-secondary); }
+
+.winctrls button + button::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 20%;
+  height: 60%;
+  width: 0.5px;
+  background: var(--zen-border);
+}
 </style>

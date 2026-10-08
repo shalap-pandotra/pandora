@@ -7,7 +7,6 @@
   <span aria-hidden="true">·</span>
   <span>Sorted by Title</span>
   <div style="flex-grow: 1;"></div>
-  <span>Read‑only mode</span>
 </div>
 
 <style>

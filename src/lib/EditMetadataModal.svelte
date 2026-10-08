@@ -1,8 +1,9 @@
 <script>
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { tick } from 'svelte';
+import { open } from '@tauri-apps/plugin-dialog';
 
-let { book, onClose, onSaved } = $props();
+let { book, draft, ui, startError, position, stagedElsewhere, onNavigate, onSave, onClose, quitRequest, onQuit } = $props();
 
 let comments = $state('');
 let originalComments = '';
@@ -25,7 +26,18 @@ let langOptions = $state([]);
 let langCodes = $state([]);
 let originalLangs = [];
 let langInput = $state('');
-let customOpen = $state(false);
+// svelte-ignore state_referenced_locally
+let customOpen = $state(ui?.customOpen ?? false);
+// svelte-ignore state_referenced_locally
+let coverOpen = $state(ui?.coverOpen ?? false);
+let confirmOpen = $state(false);
+let quitting = $state(false);
+// svelte-ignore state_referenced_locally
+let lastQuit = quitRequest;
+let keepBtn = $state();
+let coverEdit = $state(null);
+let coverError = $state('');
+let coverBusy = $state(false);
 let titleText = $state('');
 let originalTitle = $state('');
 let authorsText = $state('');
@@ -37,7 +49,8 @@ let originalIndex = null;
 let seriesNames = $state([]);
 let loaded = $state(false);
 let saving = $state(false);
-let error = $state('');
+// svelte-ignore state_referenced_locally
+let error = $state(startError ?? '');
 let commentsEl = $state();
 
 // Calibre writes dates as UTC text, and "0101-01-01" means undefined. Dates picked in the
@@ -201,9 +214,16 @@ function parseTags(text) {
 // renames the shared tag everywhere when the spelling differs.
 const keyOf = (list) => list.slice().sort().join('\u0001');
 
-$effect(() => {
-  invoke('get_comments', { bookId: book.id }).then((r) => {
-    comments = r ?? '';
+// Everything is read first and set together, so a saved draft can then be laid on top.
+async function loadForm() {
+  try {
+    const [c, series, x, cols] = await Promise.all([
+      invoke('get_comments', { bookId: book.id }),
+      invoke('get_series'),
+      invoke('get_edit_extras', { bookId: book.id }),
+      invoke('get_custom_editor', { bookId: book.id })
+    ]);
+    comments = c ?? '';
     originalComments = comments;
     stars = originalStars;
     tagsText = book.tags.join(', ');
@@ -216,37 +236,50 @@ $effect(() => {
     originalSeries = seriesText;
     originalIndex = book.series ? book.series_index : null;
     seriesIndex = originalIndex ?? 1;
-    invoke('get_series').then((r) => (seriesNames = r.map((s) => s.name)));
-    invoke('get_edit_extras', { bookId: book.id }).then((x) => {
-      idsText = x.identifiers.map(([t, v]) => `${t}:${v}`).join(', ');
-      originalIds = idsText;
-      originalIdKeys = x.identifiers.map(([t, v]) => `${t.toLowerCase()}:${v}`);
-      publisherText = x.publisher ?? '';
-      originalPublisher = publisherText;
-      publisherNames = x.publishers;
-      dateText = storedToInput(x.timestamp);
-      originalDate = dateText;
-      publishedText = storedToInput(x.pubdate);
-      originalPublished = publishedText;
-      langOptions = x.language_options;
-      langCodes = x.languages;
-      originalLangs = [...x.languages];
+    seriesNames = series.map((s) => s.name);
+    idsText = x.identifiers.map(([t, v]) => `${t}:${v}`).join(', ');
+    originalIds = idsText;
+    originalIdKeys = x.identifiers.map(([t, v]) => `${t.toLowerCase()}:${v}`);
+    publisherText = x.publisher ?? '';
+    originalPublisher = publisherText;
+    publisherNames = x.publishers;
+    dateText = storedToInput(x.timestamp);
+    originalDate = dateText;
+    publishedText = storedToInput(x.pubdate);
+    originalPublished = publishedText;
+    langOptions = x.language_options;
+    langCodes = x.languages;
+    originalLangs = [...x.languages];
+    customCols = cols.map((col) => {
+      const text = col.values.join(col.is_names ? ' & ' : ', ');
+      return { ...col, text, original: text, open: false, hi: -1 };
     });
-    invoke('get_custom_editor', { bookId: book.id }).then((cols) => {
-      customCols = cols.map((c) => {
-        const text = c.values.join(c.is_names ? ' & ' : ', ');
-        return { ...c, text, original: text, open: false, hi: -1 };
-      });
-    });
+    if (draft) restoreDraft(draft);
     loaded = true;
-  });
+  } catch (e) {
+    error = e?.message ?? String(e);
+  }
+}
+
+$effect(() => {
+  loadForm();
 });
 
 $effect(() => {
   if (loaded) commentsEl?.focus();
 });
 
-async function save() {
+$effect(() => {
+  if (confirmOpen) keepBtn?.focus();
+});
+
+// Works out what changed on this book. Returns null when an entry is invalid, and shows the
+// problem unless quiet, so Next, Previous and OK never move on from a bad entry.
+function buildEdit(quiet = false) {
+  const fail = (message) => {
+    if (!quiet) error = message;
+    return null;
+  };
   const edit = {};
   if (comments !== originalComments) edit.comments = comments;
   if (stars !== originalStars) edit.rating = stars;
@@ -256,14 +289,14 @@ async function save() {
   if (publisherText.trim() !== originalPublisher) edit.publisher = publisherText.trim();
   if (dateText !== originalDate) edit.date_added = inputToStored(dateText);
   if (publishedText !== originalPublished) edit.published = inputToStored(publishedText);
-  if (langInput.trim() && !addLanguage(true)) return;
-  if (langCodes.join(',') !== originalLangs.join(',')) edit.languages = langCodes;
+  if (coverEdit) edit.cover = coverEdit.action === 'set' ? { action: 'set', path: coverEdit.path } : { action: 'remove' };
+  if (langInput.trim()) {
+    if (quiet || !addLanguage(true)) return null;
+  }
+  if (langCodes.join(',') !== originalLangs.join(',')) edit.languages = [...langCodes];
   if (idsText !== originalIds) {
     const parsed = parseIds(idsText);
-    if (parsed.error) {
-      error = parsed.error;
-      return;
-    }
+    if (parsed.error) return fail(parsed.error);
     const now = parsed.items.map((i) => `${i.type}:${i.val}`);
     if (keyOf(now) !== keyOf(originalIdKeys)) edit.identifiers = parsed.items;
   }
@@ -289,31 +322,132 @@ async function save() {
   if (seriesChanged) edit.series = seriesName;
   if (seriesName !== '' && (seriesChanged || seriesIndex !== originalIndex)) {
     if (typeof seriesIndex !== 'number' || !Number.isFinite(seriesIndex)) {
-      error = 'Series number must be a number';
-      return;
+      return fail('Series number must be a number');
     }
     edit.series_index = seriesIndex;
   }
-  if (Object.keys(edit).length === 0) {
-    onClose();
+  return edit;
+}
+
+// Everything typed into the form, so it can be put back when you return to this book.
+function snapshot() {
+  return {
+    comments, stars, tagsText, idsText, publisherText, dateText, publishedText,
+    langCodes: [...langCodes], titleText, authorsText, seriesText, seriesIndex,
+    custom: customCols.map((c) => ({ id: c.id, text: c.text })),
+    coverEdit: coverEdit ? { ...coverEdit } : null
+  };
+}
+
+function restoreDraft(d) {
+  comments = d.comments;
+  stars = d.stars;
+  tagsText = d.tagsText;
+  idsText = d.idsText;
+  publisherText = d.publisherText;
+  dateText = d.dateText;
+  publishedText = d.publishedText;
+  langCodes = [...d.langCodes];
+  titleText = d.titleText;
+  authorsText = d.authorsText;
+  seriesText = d.seriesText;
+  seriesIndex = d.seriesIndex;
+  for (const x of d.custom) {
+    const col = customCols.find((c) => c.id === x.id);
+    if (col) col.text = x.text;
+  }
+  coverEdit = d.coverEdit ? { ...d.coverEdit } : null;
+}
+
+// Checks this book and hands its changes to the page, which keeps them until OK.
+function stage() {
+  const edit = buildEdit();
+  if (!edit) return null;
+  error = '';
+  return { edit, draft: snapshot() };
+}
+
+function go(delta) {
+  const entry = stage();
+  if (entry) onNavigate(delta, entry, { customOpen, coverOpen });
+}
+
+async function save() {
+  const entry = stage();
+  if (!entry) return;
+  saving = true;
+  try {
+    await onSave(entry);
+  } catch (e) {
+    error = e?.message ?? String(e);
+    saving = false;
+  }
+}
+
+function isDirty() {
+  if (!loaded) return false;
+  const edit = buildEdit(true);
+  return edit === null || Object.keys(edit).length > 0;
+}
+
+function pendingCount() {
+  return stagedElsewhere + (isDirty() ? 1 : 0);
+}
+
+function requestClose() {
+  if (pendingCount() === 0) onClose();
+  else confirmOpen = true;
+}
+
+// The window itself is being closed. Never stop in the middle of a save.
+function handleQuit() {
+  if (saving) return;
+  if (pendingCount() === 0) {
+    onQuit();
     return;
   }
-  saving = true;
-  error = '';
+  quitting = true;
+  confirmOpen = true;
+}
+
+$effect(() => {
+  if (quitRequest !== lastQuit) {
+    lastQuit = quitRequest;
+    handleQuit();
+  }
+});
+
+async function browseCover() {
+  coverError = '';
+  const picked = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'] }]
+  });
+  if (!picked) return;
+  coverBusy = true;
   try {
-    await invoke('save_metadata', { bookId: book.id, edit });
-    onSaved(book.id);
+    const preview = await invoke('preview_cover', { path: picked });
+    coverEdit = { action: 'set', path: picked, preview };
   } catch (e) {
-    error = String(e);
-    saving = false;
+    coverError = String(e);
+  } finally {
+    coverBusy = false;
   }
 }
 
 function handleKey(e) {
   if (e.key === 'Escape') {
-    // Collapse the custom panel first. The dialog closes on the next press.
-    if (customOpen) customOpen = false;
-      else onClose();
+    // Esc goes up one level: the prompt, then an open panel, then the dialog itself.
+    if (confirmOpen) {
+      confirmOpen = false;
+      quitting = false;
+    } else if (customOpen || coverOpen) {
+      customOpen = false;
+      coverOpen = false;
+    } else {
+      requestClose();
+    }
   }
 }
 </script>
@@ -321,7 +455,18 @@ function handleKey(e) {
 <svelte:window onkeydown={handleKey} />
 
 <div class="overlay">
-  <div class="shell">
+  {#if confirmOpen}
+    <div class="confirm-scrim">
+      <div class="confirm" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
+        <p id="confirm-title">Discard your changes to {pendingCount()} {pendingCount() === 1 ? 'book' : 'books'}{quitting ? ' and quit' : ''}?</p>
+        <div class="actions">
+          <button type="button" class="zen-btn btn-primary" bind:this={keepBtn} onclick={() => { confirmOpen = false; quitting = false; }}>Keep editing</button>
+          <button type="button" class="zen-btn btn-secondary" onclick={quitting ? onQuit : onClose}>{quitting ? 'Discard and quit' : 'Discard'}</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+  <div class="shell" inert={confirmOpen}>
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="edit-title">
       <div class="dialog-body">
         <h2 id="edit-title">Edit metadata</h2>
@@ -390,8 +535,8 @@ function handleKey(e) {
             {/each}
             <input id="em-lang" list="em-lang-list" bind:value={langInput} disabled={!loaded} placeholder="Add a language" onchange={() => addLanguage(false)} onkeydown={langKey} />
             <datalist id="em-lang-list">
-              {#each langOptions as o}<option value={o.name}></option>{/each}
-            </datalist>
+            {#each langOptions as o}<option value={o.name}></option>{/each}
+          </datalist>
           </div>
         </div>
 
@@ -410,10 +555,17 @@ function handleKey(e) {
         {/if}
         {#if error}<div class="error">{error}</div>{/if}
 
-        <div class="actions">
-          <!-- disabled until comments have loaded, so we can never save an empty draft over real text -->
-          <button class="zen-btn btn-primary" onclick={save} disabled={!loaded || saving}>OK</button>
-          <button class="zen-btn btn-secondary" onclick={onClose}>Cancel</button>
+        <div class="foot-row">
+          <div class="nav">
+            <button type="button" class="zen-btn btn-secondary nav-btn" onclick={() => go(-1)} disabled={!loaded || saving || coverBusy || position.n <= 1}>‹ Previous</button>
+            <button type="button" class="zen-btn btn-secondary nav-btn" onclick={() => go(1)} disabled={!loaded || saving || coverBusy || position.n >= position.total}>Next ›</button>
+            <span class="hint">Book {position.n} of {position.total}{pendingCount() ? ` · ${pendingCount()} edited` : ''}</span>
+          </div>
+          <div class="actions">
+            <!-- disabled until the form has loaded, so we can never save an empty draft over real text -->
+            <button class="zen-btn btn-primary" onclick={save} disabled={!loaded || saving || coverBusy}>OK</button>
+            <button class="zen-btn btn-secondary" onclick={requestClose}>Cancel</button>
+          </div>
         </div>
       </div>
     </div>
@@ -463,8 +615,43 @@ function handleKey(e) {
           {/each}
         </div>
       </div>
-      <button type="button" class="cc-tab" aria-expanded={customOpen} aria-controls="cc-panel" onclick={() => (customOpen = !customOpen)}>Custom</button>
     {/if}
+
+    <div id="cv-panel" class="cv-panel" class:open={coverOpen} inert={!coverOpen}>
+      <div class="cv-inner">
+        <h3>Cover</h3>
+        <div class="cv-preview">
+          {#if coverEdit?.action === 'set'}
+            <img src={coverEdit.preview.data_url} alt="Preview of the new cover" />
+          {:else if coverEdit?.action === 'remove'}
+            <span class="hint">The cover will be removed when you press OK.</span>
+          {:else if book.cover_path}
+            <img src={convertFileSrc(book.cover_path) + '?v=' + book.cover_version} alt="Current cover of {book.title}" />
+          {:else}
+            <span class="hint">No cover</span>
+          {/if}
+        </div>
+        {#if coverEdit?.action === 'set'}
+          <p class="hint">{coverEdit.preview.width} x {coverEdit.preview.height}. {coverEdit.preview.note}. It is saved when you press OK.</p>
+        {/if}
+        {#if coverBusy}<p class="hint">Preparing the cover…</p>{/if}
+        {#if coverError}<p class="error">{coverError}</p>{/if}
+        <div class="cv-actions">
+          <button type="button" class="zen-btn cv-btn" onclick={browseCover} disabled={!loaded || coverBusy}>Browse…</button>
+          <button type="button" class="zen-btn cv-btn" onclick={() => (coverEdit = { action: 'remove' })} disabled={!loaded || !book.cover_path || coverEdit?.action === 'remove'}>Remove cover</button>
+          {#if coverEdit}
+            <button type="button" class="zen-btn cv-btn" onclick={() => { coverEdit = null; coverError = ''; }}>Undo change</button>
+          {/if}
+        </div>
+      </div>
+    </div>
+
+    <div class="tabs">
+      {#if customCols.length}
+        <button type="button" class="side-tab" aria-expanded={customOpen} aria-controls="cc-panel" onclick={() => { customOpen = !customOpen; if (customOpen) coverOpen = false; }}>Custom</button>
+      {/if}
+      <button type="button" class="side-tab" aria-expanded={coverOpen} aria-controls="cv-panel" onclick={() => { coverOpen = !coverOpen; if (coverOpen) customOpen = false; }}>Cover</button>
+    </div>
   </div>
 </div>
 
@@ -571,6 +758,56 @@ textarea { font-family: monospace; resize: vertical; min-height: 100px; }
   transition: width 90ms ease;
 }
 .cc-panel.open { width: 340px; }
+.cv-panel {
+  order: -1;
+  flex: none;
+  display: flex;
+  width: 0;
+  overflow: hidden;
+  transition: width 90ms ease;
+}
+.cv-panel.open { width: 300px; }
+.cv-inner {
+  flex: none;
+  width: 300px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  padding: 24px;
+  border-right: 1px solid var(--zen-border);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.cv-inner h3 {
+  margin: 0 0 4px;
+  font-family: var(--zen-font-serif);
+  font-size: 17px;
+  font-weight: 400;
+  transform: scaleY(1.13);
+  transform-origin: left top;
+}
+.cv-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  padding: 12px;
+  text-align: center;
+  background: var(--zen-bg);
+  border: 1px solid var(--zen-border);
+  border-radius: 2px;
+}
+.cv-preview img { max-width: 100%; max-height: 360px; display: block; }
+.cv-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.cv-btn {
+  font-size: 12px;
+  padding: 6px 12px;
+  border: 1px solid var(--zen-border);
+  border-radius: 2px;
+  background: var(--zen-panel);
+  color: var(--zen-ink);
+}
+.cv-btn:disabled { opacity: 0.4; cursor: default; }
 .cc-inner {
   flex: none;
   width: 340px;
@@ -607,10 +844,15 @@ textarea { font-family: monospace; resize: vertical; min-height: 100px; }
 }
 .cc-opt { padding: 6px 10px; font-size: 13px; color: var(--zen-text-secondary); cursor: pointer; }
 .cc-opt.hi { background: #F7C7CE; color: var(--zen-red); }
-.cc-tab {
+.tabs {
   position: absolute;
   top: 28px;
   left: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.side-tab {
   writing-mode: vertical-rl;
   padding: 14px 7px;
   font: inherit;
@@ -623,8 +865,7 @@ textarea { font-family: monospace; resize: vertical; min-height: 100px; }
   border-radius: 0 2px 2px 0;
   cursor: pointer;
 }
-.cc-tab:hover, .cc-tab[aria-expanded='true'] { color: var(--zen-panel); }
-.cc-tab:focus-visible { outline: 2px solid var(--zen-red); outline-offset: 2px; }
+.side-tab:focus-visible { outline: 2px solid var(--zen-red); outline-offset: 2px; }
 .lang-box { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .lang-box input { width: auto; flex: 1 1 140px; }
 .lang-chip {
@@ -648,6 +889,29 @@ textarea { font-family: monospace; resize: vertical; min-height: 100px; }
 .clear-btn { font-size: 12px; color: var(--zen-text-faint); }
 .clear-btn:disabled { opacity: 0.4; cursor: default; }
 .actions { display: flex; justify-content: flex-end; gap: 10px; }
+.foot-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.nav { display: flex; align-items: center; gap: 8px; }
+.nav-btn { height: 36px; padding: 0 12px; font-size: 13px; }
+.confirm-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(28, 27, 24, 0.35);
+}
+.confirm {
+  max-width: 360px;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: var(--zen-panel);
+  border: 1px solid var(--zen-border);
+  border-radius: 2px;
+}
+.confirm p { margin: 0; font-size: 14px; color: var(--zen-ink); }
 .btn-primary, .btn-secondary {
   height: 36px;
   padding: 0 18px;

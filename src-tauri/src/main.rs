@@ -161,37 +161,6 @@ fn files_identical(a: &std::path::Path, b: &std::path::Path) -> std::io::Result<
         }
     }
 }
-#[tauri::command]
-fn save_metadata(app: tauri::AppHandle, book_id: i64, edit: library::MetadataEdit, state: State<AppState>) -> Result<(), String> {
-    if let Some(stars) = edit.rating {
-        if !(0..=5).contains(&stars) {
-            return Err("Rating must be between 0 and 5 stars".to_string());
-        }
-    }
-    if let Some(i) = edit.series_index {
-        if !i.is_finite() {
-            return Err("Series number must be a number".to_string());
-        }
-    }
-    for d in [&edit.date_added, &edit.published].into_iter().flatten() {
-        if !library::valid_stored_date(d) {
-            return Err("That date isn't valid".to_string());
-        }
-    }
-    if let Some(codes) = &edit.languages {
-        for c in codes {
-            if !library::valid_language_code(c) {
-                return Err(format!("\"{}\" isn't a known language code", c));
-            }
-        }
-    }
-    backup_once(&app, &state)?;
-    let path = get_path(&state)?;
-    let mut conn = library::open_library_rw(&path).map_err(|e| e.to_string())?;
-    let moves = library::write_metadata(&mut conn, &path, book_id, &edit)?;
-    log_renames(&app, &path, &moves);
-    Ok(())
-}
 
 #[tauri::command]
 fn get_next_series_index(series: String, state: State<AppState>) -> Result<f64, String> {
@@ -237,6 +206,62 @@ fn get_edit_extras(book_id: i64, state: State<AppState>) -> Result<library::Edit
     with_conn(&state, |conn| library::edit_extras(conn, book_id).map_err(|e| e.to_string()))
 }
 
+#[tauri::command(async)]
+fn preview_cover(path: String) -> Result<library::CoverPreview, String> {
+    library::preview_cover(&path)
+}
+
+fn check_edit(edit: &library::MetadataEdit) -> Result<(), String> {
+    if let Some(stars) = edit.rating {
+        if !(0..=5).contains(&stars) {
+            return Err("Rating must be between 0 and 5 stars".to_string());
+        }
+    }
+    if let Some(i) = edit.series_index {
+        if !i.is_finite() {
+            return Err("Series number must be a number".to_string());
+        }
+    }
+    for d in [&edit.date_added, &edit.published].into_iter().flatten() {
+        if !library::valid_stored_date(d) {
+            return Err("That date isn't valid".to_string());
+        }
+    }
+    if let Some(codes) = &edit.languages {
+        for c in codes {
+            if !library::valid_language_code(c) {
+                return Err(format!("\"{}\" isn't a known language code", c));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn save_metadata_batch(
+    app: tauri::AppHandle,
+    items: Vec<library::BatchItem>,
+    state: State<'_, AppState>,
+) -> Result<(), library::BatchError> {
+    let plain = |message: String| library::BatchError { book_id: None, message };
+    for it in &items {
+        check_edit(&it.edit)
+            .map_err(|message| library::BatchError { book_id: Some(it.book_id), message })?;
+    }
+    backup_once(&app, &state).map_err(plain)?;
+    let path = get_path(&state).map_err(plain)?;
+    let app_for_log = app.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), library::BatchError> {
+        let mut conn = library::open_library_rw(&path)
+            .map_err(|e| library::BatchError { book_id: None, message: e.to_string() })?;
+        let moves = library::write_metadata_batch(&mut conn, &path, &items)?;
+        log_renames(&app_for_log, &path, &moves);
+        Ok(())
+    })
+    .await
+    .map_err(|e| library::BatchError { book_id: None, message: e.to_string() })?
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -254,9 +279,10 @@ fn main() {
             get_multi_text_columns,
             get_comments,
             get_next_series_index,
-            save_metadata,
+            save_metadata_batch,
             get_custom_editor,
             get_edit_extras,
+            preview_cover,
             save_last_library_path,
             load_last_library_path
         ])

@@ -14,6 +14,7 @@ pub struct Book {
     pub path: String,
     pub has_cover: bool,
     pub cover_path: Option<String>,
+    pub cover_version: i64,
     pub rating: Option<i64>,
 }
 
@@ -375,6 +376,7 @@ pub fn open_library_rw(library_path: &str) -> rusqlite::Result<Connection> {
 
 #[derive(serde::Deserialize)]
 pub struct MetadataEdit {
+    pub cover: Option<CoverEdit>, // None means unchanged
     pub tags: Option<Vec<String>>, // None means unchanged
     pub series: Option<String>,    // None means unchanged, empty string clears
     pub series_index: Option<f64>, // None means unchanged
@@ -392,25 +394,59 @@ pub struct MetadataEdit {
 
 // Each field only runs if it was actually changed. One transaction covers all of
 // them, so a failure part way through leaves the library untouched.
-pub fn write_metadata(
+#[derive(serde::Deserialize)]
+pub struct BatchItem {
+    pub book_id: i64,
+    pub edit: MetadataEdit,
+}
+
+#[derive(Serialize)]
+pub struct BatchError {
+    pub book_id: Option<i64>,
+    pub message: String,
+}
+
+// Saves several books in one transaction. Edits are applied in the order given, so when two
+// books touch the same shared value (a recase, say), the later edit wins, as it would if they
+// were saved one at a time. If any book fails, every folder move and cover change made so far
+// is undone, and nothing is committed.
+pub fn write_metadata_batch(
     conn: &mut Connection,
     library_path: &str,
-    book_id: i64,
-    edit: &MetadataEdit,
-) -> Result<Vec<(String, String)>, String> {
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
-    // If this fails, tx is dropped and the database part rolls back by itself.
-    let log = apply_edit(&tx, library_path, book_id, edit)?;
+    items: &[BatchItem],
+) -> Result<Vec<(String, String)>, BatchError> {
+    let tx = conn
+        .transaction()
+        .map_err(|e| BatchError { book_id: None, message: e.to_string() })?;
+    let mut logs: Vec<FsLog> = Vec::new();
+    for item in items {
+        match apply_edit(&tx, library_path, item.book_id, &item.edit) {
+            Ok(log) => logs.push(log),
+            Err(message) => {
+                for log in logs.iter().rev() {
+                    log.undo();
+                }
+                return Err(BatchError { book_id: Some(item.book_id), message });
+            }
+        }
+    }
     if let Err(e) = tx.commit() {
-        // The folders were already moved, so move them back.
-        log.undo();
-        return Err(e.to_string());
+        for log in logs.iter().rev() {
+            log.undo();
+        }
+        return Err(BatchError { book_id: None, message: e.to_string() });
     }
     let lib = std::path::Path::new(library_path);
     let rel = |p: &std::path::Path| -> String {
         p.strip_prefix(lib).unwrap_or(p).to_string_lossy().replace('\\', "/")
     };
-    Ok(log.moves.iter().map(|(a, b)| (rel(a.as_path()), rel(b.as_path()))).collect())
+    let mut moves = Vec::new();
+    for log in &logs {
+        for (a, b) in &log.moves {
+            moves.push((rel(a.as_path()), rel(b.as_path())));
+        }
+    }
+    Ok(moves)
 }
 
 fn db<T>(r: rusqlite::Result<T>) -> Result<T, String> {
@@ -422,11 +458,23 @@ struct FsLog {
     moves: Vec<(PathBuf, PathBuf)>,
     created: Vec<PathBuf>,
     removed: Vec<PathBuf>,
+    cover: Option<(PathBuf, Option<Vec<u8>>)>,
 }
 
 impl FsLog {
     // Best effort, in reverse order: recreate removed folders, move things back, drop new folders.
     fn undo(&self) {
+        // The cover lives in the book's final folder, so it goes back before any folder moves.
+        if let Some((file, previous)) = &self.cover {
+            match previous {
+                Some(bytes) => {
+                    let _ = std::fs::write(file, bytes);
+                }
+                None => {
+                    let _ = std::fs::remove_file(file);
+                }
+            }
+        }
         for d in &self.removed {
             let _ = std::fs::create_dir_all(d);
         }
@@ -769,6 +817,189 @@ fn run_fs_plans(library_path: &str, plans: &[BookPlan]) -> Result<FsLog, String>
     }
 }
 
+#[derive(serde::Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase")]
+pub enum CoverEdit {
+    Set { path: String },
+    Remove,
+}
+
+// Sizes and quality as measured on a real calibre library: a JPEG inside the box is kept
+// as it is, a bigger one is scaled to fit, and anything else becomes a JPEG at quality 90.
+const COVER_MAX_W: u32 = 1650;
+const COVER_MAX_H: u32 = 2200;
+const COVER_QUALITY: u8 = 90;
+
+#[derive(Clone)]
+struct PreparedCover {
+    preview: Vec<u8>,
+    bytes: Vec<u8>,
+    width: u32,
+    height: u32,
+    note: String,
+}
+
+// Fits inside the box without changing the shape. The second side is truncated, not rounded,
+// which is what calibre does (3182x4500 becomes 1555x2200).
+fn fit_inside(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    let (w, h, mw, mh) = (w as u64, h as u64, max_w as u64, max_h as u64);
+    if w * mh > h * mw {
+        (mw as u32, (h * mw / w).max(1) as u32)
+    } else {
+        ((w * mh / h).max(1) as u32, mh as u32)
+    }
+}
+
+// Transparent areas become white, since a JPEG can't be transparent.
+fn flatten_on_white(img: &image::DynamicImage) -> image::RgbImage {
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let mut out = image::RgbImage::new(w, h);
+    for (x, y, p) in rgba.enumerate_pixels() {
+        let a = p[3] as u32;
+        let mix = |c: u8| ((c as u32 * a + 255 * (255 - a)) / 255) as u8;
+        out.put_pixel(x, y, image::Rgb([mix(p[0]), mix(p[1]), mix(p[2])]));
+    }
+    out
+}
+
+fn encode_jpeg(img: &image::DynamicImage, quality: u8) -> Result<Vec<u8>, String> {
+    let rgb = flatten_on_white(img);
+    let mut out: Vec<u8> = Vec::new();
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
+    image::DynamicImage::ImageRgb8(rgb)
+        .write_with_encoder(encoder)
+        .map_err(|e| format!("Could not encode the cover: {}", e))?;
+    Ok(out)
+}
+
+// The last prepared cover is kept in memory. The dialog prepares it when a file is picked,
+// and saving reuses it instead of doing the work a second time.
+static COVER_CACHE: std::sync::Mutex<Option<(String, u64, u128, PreparedCover)>> =
+std::sync::Mutex::new(None);
+
+fn file_key(path: &str) -> Option<(u64, u128)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+    Some((meta.len(), modified))
+}
+
+fn make_preview(img: &image::DynamicImage) -> Result<Vec<u8>, String> {
+    // thumbnail() is a fast scaler, which is plenty for an on-screen preview.
+    let thumb = if img.width() > 600 || img.height() > 800 {
+        img.thumbnail(600, 800)
+    } else {
+        img.clone()
+    };
+    encode_jpeg(&thumb, 85)
+}
+
+fn prepare_cover(path: &str) -> Result<PreparedCover, String> {
+    let key = file_key(path);
+    if let Some((len, modified)) = key {
+        if let Some((p, l, m, prepared)) = COVER_CACHE.lock().unwrap().as_ref() {
+            if p.as_str() == path && *l == len && *m == modified {
+                return Ok(prepared.clone());
+            }
+        }
+    }
+    let prepared = prepare_cover_uncached(path)?;
+    if let Some((len, modified)) = key {
+        *COVER_CACHE.lock().unwrap() = Some((path.to_string(), len, modified, prepared.clone()));
+    }
+    Ok(prepared)
+}
+
+fn prepare_cover_uncached(path: &str) -> Result<PreparedCover, String> {
+    let original = std::fs::read(path).map_err(|e| format!("Could not read {}: {}", path, e))?;
+    let img = image::load_from_memory(&original)
+        .map_err(|_| format!("{} is not a valid picture", path))?;
+    let is_jpeg = matches!(image::guess_format(&original), Ok(image::ImageFormat::Jpeg));
+    let (w, h) = (img.width(), img.height());
+    let too_big = w > COVER_MAX_W || h > COVER_MAX_H;
+    let preview = make_preview(&img)?;
+    if is_jpeg && !too_big {
+        return Ok(PreparedCover {
+            bytes: original,
+            preview,
+            width: w,
+            height: h,
+            note: "Used as it is".to_string(),
+        });
+    }
+    let (nw, nh) = if too_big { fit_inside(w, h, COVER_MAX_W, COVER_MAX_H) } else { (w, h) };
+    let scaled = if too_big {
+        img.resize_exact(nw, nh, image::imageops::FilterType::CatmullRom)
+    } else {
+        img
+    };
+    let bytes = encode_jpeg(&scaled, COVER_QUALITY)?;
+    let note = match (is_jpeg, too_big) {
+        (true, true) => format!("Scaled down from {}x{} to fit {}x{}", w, h, COVER_MAX_W, COVER_MAX_H),
+        (false, true) => format!("Converted to JPEG and scaled down from {}x{}", w, h),
+        _ => "Converted to JPEG".to_string(),
+    };
+    Ok(PreparedCover { bytes, preview, width: nw, height: nh, note })
+}
+
+#[derive(Serialize)]
+pub struct CoverPreview {
+    pub data_url: String,
+    pub width: u32,
+    pub height: u32,
+    pub note: String,
+}
+
+// What the dialog shows after a file is picked. A bad file is rejected here.
+pub fn preview_cover(path: &str) -> Result<CoverPreview, String> {
+    let prepared = prepare_cover(path)?;
+    use base64::Engine;
+    Ok(CoverPreview {
+        data_url: format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&prepared.preview)
+        ),
+        width: prepared.width,
+        height: prepared.height,
+        note: prepared.note,
+    })
+}
+
+// Writes next to the target and renames over it, so a failure never leaves half a cover.
+fn write_replacing(file: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let mut tmp = file.as_os_str().to_owned();
+    tmp.push(".pandora-tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, bytes).map_err(|e| format!("Could not write the cover: {}", e))?;
+    if let Err(e) = std::fs::rename(&tmp, file) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("Could not replace the cover: {}", e));
+    }
+    Ok(())
+}
+
+// Calibre keeps a book's cover as cover.jpg in its folder, plus a has_cover flag.
+// The previous file is held in memory until the save is committed, so a failure puts it back.
+fn apply_cover(tx: &Connection, library_path: &str, book_id: i64, cover: &CoverEdit, log: &mut FsLog) -> Result<(), String> {
+    let rel: String = db(tx.query_row("SELECT path FROM books WHERE id = ?1", [book_id], |row| row.get(0)))?;
+    let file = std::path::Path::new(library_path).join(rel).join("cover.jpg");
+    log.cover = Some((file.clone(), std::fs::read(&file).ok()));
+    match cover {
+        CoverEdit::Remove => {
+            if file.exists() {
+                std::fs::remove_file(&file).map_err(|e| format!("Could not remove the cover: {}", e))?;
+            }
+            db(tx.execute("UPDATE books SET has_cover = 0 WHERE id = ?1", [book_id]))?;
+        }
+        CoverEdit::Set { path } => {
+            let prepared = prepare_cover(path)?;
+            write_replacing(&file, &prepared.bytes)?;
+            db(tx.execute("UPDATE books SET has_cover = 1 WHERE id = ?1", [book_id]))?;
+        }
+    }
+    Ok(())
+}
+
 fn apply_edit(tx: &Connection, library_path: &str, book_id: i64, edit: &MetadataEdit) -> Result<FsLog, String> {
     db(apply_basic_fields(tx, book_id, edit))?;
 
@@ -816,7 +1047,7 @@ fn apply_edit(tx: &Connection, library_path: &str, book_id: i64, edit: &Metadata
         }
     }
 
-    let log = run_fs_plans(library_path, &plans)?;
+    let mut log = run_fs_plans(library_path, &plans)?;
 
     let record = || -> rusqlite::Result<()> {
         for p in &plans {
@@ -840,6 +1071,13 @@ fn apply_edit(tx: &Connection, library_path: &str, book_id: i64, edit: &Metadata
     if let Err(e) = record() {
         log.undo();
         return Err(e.to_string());
+    }
+
+    if let Some(cover) = &edit.cover {
+        if let Err(e) = apply_cover(tx, library_path, book_id, cover, &mut log) {
+            log.undo();
+            return Err(e);
+        }
     }
     Ok(log)
 }
@@ -1534,6 +1772,13 @@ pub fn list_books(conn: &Connection, library_path: &str, filter: &BookFilter) ->
         let path: String = row.get(2)?;
         let has_cover = row.get::<_, i64>(3)? != 0;
         let cover_path = resolve_cover(library_path, &path, has_cover);
+        let cover_version = cover_path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
         let authors = row.get::<_, Option<String>>(5)?
             .map(|s| restore_author_name(&s))
             .unwrap_or_default();
@@ -1552,6 +1797,7 @@ pub fn list_books(conn: &Connection, library_path: &str, filter: &BookFilter) ->
             series: row.get(6)?,
             rating: row.get(8)?,
             cover_path,
+            cover_version,
             tags,
         })
     })?;
