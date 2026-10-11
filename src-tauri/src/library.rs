@@ -350,6 +350,49 @@ fn resolve_cover(library_path: &str, book_path: &str, has_cover: bool) -> Option
     cover.exists().then(|| cover.to_string_lossy().to_string())
 }
 
+#[derive(Serialize)]
+pub struct PickerBook {
+    pub id: i64,
+    pub title: String,
+    pub authors: String,
+}
+
+/// Every book that has an EPUB, by title and author only, for the reader's Ctrl+O picker.
+pub fn epub_books(conn: &Connection) -> rusqlite::Result<Vec<PickerBook>> {
+    let mut stmt = conn.prepare(
+        "SELECT b.id, b.title,
+            (SELECT group_concat(replace(a.name, '|', ','), ' & ')
+             FROM authors a JOIN books_authors_link bal ON bal.author = a.id
+             WHERE bal.book = b.id) AS authors
+         FROM books b
+         WHERE EXISTS (SELECT 1 FROM data d WHERE d.book = b.id AND upper(d.format) = 'EPUB')
+         ORDER BY b.sort",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(PickerBook {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            authors: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        })
+    })?;
+    rows.collect()
+}
+
+/// Where a book's EPUB sits on disk, if it has one.
+pub fn epub_path(conn: &Connection, library_path: &str, book_id: i64) -> rusqlite::Result<Option<PathBuf>> {
+    conn.query_row(
+        "SELECT b.path, d.name FROM books b JOIN data d ON d.book = b.id
+         WHERE b.id = ?1 AND upper(d.format) = 'EPUB'",
+        [book_id],
+        |row| {
+            let folder: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            Ok(PathBuf::from(library_path).join(folder).join(format!("{}.epub", name)))
+        },
+    )
+    .optional()
+}
+
 pub fn open_library(library_path: &str) -> rusqlite::Result<Connection> {
     let db_path = PathBuf::from(library_path).join("metadata.db");
     // Read-only for everything except saving edits

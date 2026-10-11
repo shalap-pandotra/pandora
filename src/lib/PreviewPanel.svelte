@@ -5,8 +5,21 @@ import DOMPurify from 'dompurify';
 let { book, libraryLoaded, onEdit } = $props();
 
 let comments = $state(null);
+let openError = $state('');
+
+// Also called from the library's V key, so its errors show here too.
+export async function openBook() {
+  if (!book) return;
+  openError = '';
+  try {
+    await invoke('open_book', { bookId: book.id });
+  } catch (e) {
+    openError = String(e);
+  }
+}
 
 $effect(() => {
+  openError = '';
   if (!book) {
     comments = null;
     return;
@@ -64,8 +77,9 @@ let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null)
         {/if}     </div>
 
       <div class="meta-actions">
-        <button class="zen-btn btn-primary">Open book</button>
+        <button class="zen-btn btn-primary" onclick={openBook}>Open book</button>
         <button class="zen-btn btn-secondary" onclick={onEdit}>Edit metadata</button>
+        {#if openError}<span class="open-error">{openError}</span>{/if}
       </div>
     </div>
 
@@ -138,6 +152,7 @@ let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null)
   overflow-y: auto;
   display: flex; flex-direction: column; gap: 16px;
 }
+.open-error { align-self: center; font-size: 13px; color: var(--zen-red); }
 .meta-actions {
   flex: none;
   display: flex; gap: 10px;

@@ -13,10 +13,11 @@ let activeTag = $state(null);
 let multiTextColumns = $state([]);
 let expandedNodes = $state(new Set());
 let activeCustomValue = $state(null); // { columnId, valueId } or null
-let authorsExpanded = $state(true);
-let seriesExpanded = $state(true);
-let tagsExpanded = $state(true);
-let collapsedColumns = $state(new Set());
+// Every filter section starts collapsed.
+let authorsExpanded = $state(false);
+let seriesExpanded = $state(false);
+let tagsExpanded = $state(false);
+let expandedColumns = $state(new Set());
 
 let columnTrees = $derived(
   multiTextColumns.map((col) => ({ ...col,  tree: buildTree(col.values, col.is_hierarchical)}))
@@ -140,11 +141,11 @@ function emitFilter() {
   });
 }
 
-function toggleColumnCollapsed(colId) {
-  const next = new Set(collapsedColumns);
+function toggleColumn(colId) {
+  const next = new Set(expandedColumns);
   if (next.has(colId)) next.delete(colId);
     else next.add(colId);
-  collapsedColumns = next;
+  expandedColumns = next;
 }
 
 const tools = [
@@ -249,11 +250,11 @@ const tools = [
 
   {#each columnTrees as col (col.id)}
     <div>
-      <button class="zen-btn section-header" onclick={() => toggleColumnCollapsed(col.id)}>
+      <button class="zen-btn section-header" onclick={() => toggleColumn(col.id)}>
         <span class="section-title" style="margin:0;">{col.name}</span>
-        <span class="section-chevron">{collapsedColumns.has(col.id) ? '+' : '−'}</span>
+        <span class="section-chevron">{expandedColumns.has(col.id) ? '−' : '+'}</span>
       </button>
-      {#if !collapsedColumns.has(col.id)}
+      {#if expandedColumns.has(col.id)}
         <div class="stack">
           {#each col.tree as node}
             {@render treeNode(node, col.id)}

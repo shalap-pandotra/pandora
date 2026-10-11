@@ -15,6 +15,13 @@
   --zen-font-sans: 'Public Sans', sans-serif;
 }
 
+/* No scroll bounce anywhere: a scroll area stops dead at its ends, with no stretch and
+   spring back (WebView2's elastic overscroll), and never passes the scroll on to the
+   area around it. */
+html, body, * {
+  overscroll-behavior: none;
+}
+
 body {
   margin: 0;
   background: var(--zen-bg);

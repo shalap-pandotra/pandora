@@ -29,6 +29,8 @@ let currentFilter = $state({ author_id: null, series_id: null, tag_id: null, sea
 let gridHeight = $state(224);
 let dragging = false;
 let mainColEl = $state();
+/** @type {any} */
+let previewPanel = $state();
 
 
 let cachedRect = null;
@@ -82,6 +84,13 @@ onMount(() => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'o') {
       e.preventDefault();
       pickLibraryFolder();
+      return;
+    }
+    // V opens the selected book, unless something is being typed or edited.
+    const typing = e.target instanceof HTMLElement && (e.target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName));
+    if (e.key.toLowerCase() === 'v' && !e.ctrlKey && !e.metaKey && !e.altKey && !typing && editIndex < 0) {
+      e.preventDefault();
+      previewPanel?.openBook();
     }
   }
   window.addEventListener('keydown', handleKeydown);
@@ -319,7 +328,7 @@ async function openLibrary() {
   <div class="body-row">
     <Sidebar onFilterChange={handleFilterChange} onReset={handleReset} libraryLoaded={libraryLoaded} onEditMetadata={openEditor} refreshKey={sidebarVersion} />
     <div class="main-col" bind:this={mainColEl}>
-      <PreviewPanel book={selectedBook} libraryLoaded={libraryLoaded} onEdit={openEditor} />
+      <PreviewPanel bind:this={previewPanel} book={selectedBook} libraryLoaded={libraryLoaded} onEdit={openEditor} />
       <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div

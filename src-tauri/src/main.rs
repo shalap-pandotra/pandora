@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod library;
+mod reader;
 
 use std::sync::Mutex;
 use tauri::State;
@@ -262,9 +263,132 @@ async fn save_metadata_batch(
     .map_err(|e| library::BatchError { book_id: None, message: e.to_string() })?
 }
 
+#[tauri::command]
+async fn open_book(app: tauri::AppHandle, book_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    let library = get_path(&state)?;
+    let path = with_conn(&state, |conn| library::epub_path(conn, &library, book_id).map_err(|e| e.to_string()))?
+        .ok_or("This book has no EPUB")?;
+    if !path.is_file() {
+        return Err("The EPUB file is missing from the library folder".to_string());
+    }
+    reader::open_window(&app, path)
+}
+
+// A reader window that cannot open its file closes without a word.
+#[tauri::command]
+fn reader_load(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<reader::OpenedBook, String> {
+    reader::load(&app, window.label()).inspect_err(|_| {
+        let _ = window.destroy();
+    })
+}
+
+/// The library the reader's picker shows: the one open in Pandora, or else the last one used.
+/// The reader opens it on its own, read-only, only for as long as one query takes.
+fn reader_library(app: &tauri::AppHandle, state: &State<AppState>) -> Result<(String, Connection), String> {
+    let path = state
+        .library_path
+        .lock()
+        .unwrap()
+        .clone()
+        .or_else(|| load_last_library_path(app.clone()))
+        .ok_or("No library has been opened in Pandora yet")?;
+    let conn = library::open_library(&path).map_err(|e| e.to_string())?;
+    Ok((path, conn))
+}
+
+#[tauri::command(async)]
+fn reader_library_books(app: tauri::AppHandle, state: State<AppState>) -> Result<Vec<library::PickerBook>, String> {
+    let (_, conn) = reader_library(&app, &state)?;
+    library::epub_books(&conn).map_err(|e| e.to_string())
+}
+
+/// Swaps the book in this reader window for a library book (by id) or any file on disk.
+#[tauri::command(async)]
+fn reader_replace(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<AppState>,
+    book_id: Option<i64>,
+    path: Option<String>,
+) -> Result<(), String> {
+    let path = match (book_id, path) {
+        (Some(id), _) => {
+            let (library, conn) = reader_library(&app, &state)?;
+            library::epub_path(&conn, &library, id)
+                .map_err(|e| e.to_string())?
+                .ok_or("This book has no EPUB")?
+        }
+        (None, Some(path)) => std::path::PathBuf::from(path),
+        (None, None) => return Err("No book was chosen".to_string()),
+    };
+    reader::replace(&app, window.label(), path)
+}
+
+/// Once the library window is gone, everything the library held is let go: the open
+/// metadata.db and its path. Only the book windows remain.
+fn release_library(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    *state.conn.lock().unwrap() = None;
+    *state.library_path.lock().unwrap() = None;
+    *state.backed_up.lock().unwrap() = false;
+}
+
+/// Launching Pandora again brings the library back in the running process: its window is
+/// shown if it is still open, or built again from the app's configuration if it was closed.
+fn show_library(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(config) = app.config().app.windows.first().cloned() else { return };
+        match tauri::WebviewWindowBuilder::from_config(&app, &config).and_then(|b| b.build()) {
+            Ok(window) => {
+                let _ = window.set_focus();
+            }
+            Err(e) => eprintln!("could not reopen the library window: {e}"),
+        }
+    });
+}
+
+#[tauri::command]
+fn reader_settings(app: tauri::AppHandle) -> reader::Settings {
+    reader::settings(&app)
+}
+
+#[tauri::command]
+fn set_reader_settings(app: tauri::AppHandle, window: tauri::WebviewWindow, settings: reader::Settings) -> Result<reader::Settings, String> {
+    reader::set_settings(&app, window.label(), settings)
+}
+
+#[tauri::command]
+fn reader_position(app: tauri::AppHandle, key: String) -> Option<reader::Position> {
+    reader::position(&app, &key)
+}
+
+#[tauri::command]
+fn save_reader_position(app: tauri::AppHandle, key: String, position: reader::Position) -> Result<(), String> {
+    reader::set_position(&app, key, position)
+}
+
 fn main() {
     tauri::Builder::default()
+        // Must come first, so a second launch is caught before anything else starts.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_library(app)))
         .plugin(tauri_plugin_dialog::init())
+        .manage(reader::ReaderState::default())
+        .register_asynchronous_uri_scheme_protocol(reader::PROTOCOL, reader::protocol)
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                if window.label() == "main" {
+                    release_library(window.app_handle());
+                } else {
+                    reader::forget(window.app_handle(), window.label());
+                }
+            }
+        })
         .manage(AppState {
             library_path: Mutex::new(None),
             conn: Mutex::new(None),
@@ -284,7 +408,15 @@ fn main() {
             get_edit_extras,
             preview_cover,
             save_last_library_path,
-            load_last_library_path
+            load_last_library_path,
+            open_book,
+            reader_load,
+            reader_settings,
+            set_reader_settings,
+            reader_position,
+            save_reader_position,
+            reader_library_books,
+            reader_replace
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

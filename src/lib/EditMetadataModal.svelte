@@ -755,25 +755,24 @@ textarea { font-family: monospace; resize: vertical; min-height: 100px; }
   display: flex;
   width: 0;
   overflow: hidden;
-  transition: width 90ms ease;
+  transition: width 70ms ease;
 }
 .cc-panel.open { width: 340px; }
 .cv-panel {
-  order: -1;
   flex: none;
   display: flex;
   width: 0;
   overflow: hidden;
-  transition: width 90ms ease;
+  transition: width 70ms ease;
 }
-.cv-panel.open { width: 300px; }
+.cv-panel.open { width: 340px; }
 .cv-inner {
   flex: none;
   width: 300px;
   box-sizing: border-box;
   overflow-y: auto;
   padding: 24px;
-  border-right: 1px solid var(--zen-border);
+  border-left: 1px solid var(--zen-border);
   display: flex;
   flex-direction: column;
   gap: 14px;
