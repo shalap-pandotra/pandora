@@ -25,6 +25,8 @@ const PERCENT_ROOM = 20;
 
 let title = $state('');
 let percent = $state(/** @type {number | null} */ (null));
+/** The book fraction foliate last reported. It is saved beside the place, for information only. */
+let lastFraction = 0;
 let panelOpen = $state(false);
 let panelHeight = $state(0);
 let pickerOpen = $state(false);
@@ -187,7 +189,9 @@ const waiting = new WeakMap();
 // that would land somewhere the pictures then push around.
 function whenSized(/** @type {Document | undefined} */ doc) {
   if (!doc?.body) return Promise.resolve();
-  return Promise.all([...doc.body.querySelectorAll('img')].map((img) => waiting.get(img)).filter(Boolean));
+  // The book's own fonts count too: they reflow every line once they arrive.
+  const pending = [...doc.body.querySelectorAll('img')].map((img) => waiting.get(img));
+  return Promise.all([doc.fonts?.ready, ...pending].filter(Boolean));
 }
 /** Natural sizes read ahead of the images themselves loading. */
 const sizes = new WeakMap();
@@ -348,7 +352,7 @@ function layoutFigures(/** @type {Document} */ doc) {
       const box = /** @type {SVGSVGElement} */ (svg).viewBox?.baseVal;
       const ratio = box?.width && box?.height ? box.width / box.height : 0;
       if (ratio) placePicture(svg, ratio, Infinity);
-      else placePicture(svg, 1e6, Infinity);
+        else placePicture(svg, 1e6, Infinity);
       figures.add(svg);
     } else setImportant(svg, { 'max-height': inlineMax() });
   }
@@ -395,17 +399,17 @@ function applyLayout() {
   /** @type {Record<string, string>} */
   const attrs = twoUp() && area.width > 0
     ? (() => {
-        const g = sides / W;
-        return {
-          flow: 'paginated',
-          'max-column-count': '2',
-          // foliate puts two columns side by side once a column may be no wider than half
-          // of its own area, which is W less the outer spaces.
-          'max-inline-size': `${Math.ceil((W * (1 - g)) / 2) + 1}px`,
-          'max-block-size': '100000px',
-          gap: `${(100 * g).toFixed(4)}%`,
-        };
-      })()
+      const g = sides / W;
+      return {
+        flow: 'paginated',
+        'max-column-count': '2',
+        // foliate puts two columns side by side once a column may be no wider than half
+        // of its own area, which is W less the outer spaces.
+        'max-inline-size': `${Math.ceil((W * (1 - g)) / 2) + 1}px`,
+        'max-block-size': '100000px',
+        gap: `${(100 * g).toFixed(4)}%`,
+      };
+    })()
     : { flow: 'scrolled', 'max-column-count': '1', 'max-inline-size': '100000px', gap: '0%' };
   attrs.margin = '0px';
   // Every change makes foliate draw the chapter again, so only real changes are made.
@@ -433,6 +437,7 @@ function syncLayout() {
   const cfi = view.lastLocation?.cfi;
   shownTwoUp = two;
   resting = null;
+  pinnedEnd = null;
   cutoff = 0;
   applyLayout();
   for (const { doc } of view.renderer.getContents()) layoutFigures(doc);
@@ -501,8 +506,8 @@ function stopsOf(/** @type {Document} */ doc) {
   /** @type {Set<Element>} */
   const figureSet = figuresOf.get(doc) ?? new Set();
   const pictures = [...figureSet]
-    .map((el) => ({ el, ...span(el.getBoundingClientRect()) }))
-    .sort((a, b) => a.top - b.top);
+  .map((el) => ({ el, ...span(el.getBoundingClientRect()) }))
+  .sort((a, b) => a.top - b.top);
 
   // Every line of text and every inline image. Pieces on the same line (a word in italics,
   // a footnote mark) are merged into one line.
@@ -579,7 +584,7 @@ function stopsOf(/** @type {Document} */ doc) {
     stops.push({ at: p.top, picture: p.el });
     from = p.bottom;
   }
-  textStops(from, Infinity, from === 0);
+  textStops(from, Infinity, from === 0, true);
   if (!stops.length) stops.push({ at: 0 });
 
   const result = { key, stops, lines };
@@ -626,16 +631,28 @@ function coverCutLine(/** @type {Document} */ doc, /** @type {number} */ s) {
 /** @type {{ doc: Document, start?: boolean, picture?: Element, node?: Node, offset?: number } | null} */
 let resting = null;
 /** The scroll offset the reader itself last set, to tell its own scrolling from anyone else's. */
+
 let written = -1;
+/** The chapter the reader was sent to the end of. Until the reader moves on its own, settling
+ * keeps it on the last stop, even if a late font or picture makes the chapter longer. */
+/** @type {Document | null} */
+let pinnedEnd = null;
+/** For each chapter left by going on: how many stops before its last one the reader left it
+ * from. Coming back lands on that same screen. */
+/** @type {Map<number, number>} */
+const exits = new Map();
+/** The pin's resting stop, counted back from the last one. Null is the last stop with whole text. */
+/** @type {number | null} */
+let endBack = null;
 
 function remember(/** @type {Document} */ doc, /** @type {Stop} */ stop) {
   if (stop.picture) resting = { doc, picture: stop.picture };
-  else if (stop.at < 0.5) resting = { doc, start: true };
-  else {
-    const x = doc.body.getBoundingClientRect().left + 4;
-    const caret = doc.caretRangeFromPoint?.(x, stop.at + 2);
-    resting = caret ? { doc, node: caret.startContainer, offset: caret.startOffset } : null;
-  }
+    else if (stop.at < 0.5) resting = { doc, start: true };
+      else {
+        const x = doc.body.getBoundingClientRect().left + 4;
+        const caret = doc.caretRangeFromPoint?.(x, stop.at + 2);
+        resting = caret ? { doc, node: caret.startContainer, offset: caret.startOffset } : null;
+      }
 }
 
 /** Where the remembered spot is now, or null when there is none for this chapter. */
@@ -654,28 +671,65 @@ function restingAt(/** @type {Document} */ doc) {
   return rect.height > 0 ? rect.top : null;
 }
 
+/**
+ * The place the reader rests on, as a position foliate can restore: the first character of the
+ * top line, or the picture. Foliate's own idea of the place depends on exactly where the top
+ * edge falls, so a book would creep down a line each time it was closed and opened.
+ */
+function restingCfi() {
+  const doc = resting?.doc;
+  const index = view?.renderer?.getContents()[0]?.index;
+  if (!resting || !doc || doc !== currentDoc() || index == null) return null;
+  try {
+    const range = doc.createRange();
+    if (resting.start) range.setStart(doc.body, 0);
+    else if (resting.picture) range.setStart(resting.picture, 0);
+    else if (resting.node?.isConnected) range.setStart(resting.node, resting.offset ?? 0);
+    else return null;
+    range.collapse(true);
+    return view.getCFI(index, range);
+  } catch {
+    return null;
+  }
+}
+
 /** Puts the screen on a stop. Every move is instant: a line, a screen, or a picture. */
-function moveTo(/** @type {Document} */ doc, /** @type {Stop} */ stop) {
+function moveTo(/** @type {Document} */ doc, /** @type {Stop} */ stop, /** @type {{ settling?: boolean }} */ { settling = false } = {}) {
   const el = scrollerOf(doc);
   if (!el) return;
+  if (!settling) pinnedEnd = null;
   showPictures(doc, stop.at);
   el.scrollTop = stop.at;
   written = el.scrollTop;
   coverCutLine(doc, stop.at);
   remember(doc, stop);
+  if (ready) {
+    const own = restingCfi();
+    if (own) savePositionSoon(own, lastFraction);
+  }
 }
 
 /** Brings the screen back onto a stop: the remembered spot's, or the chapter's last. */
 function settle(/** @type {{ toEnd?: boolean }} */ { toEnd = false } = {}) {
   // Pages have no stops: foliate keeps them aligned itself.
   if (twoUp()) return;
+  // While a book is still opening, foliate's own anchoring keeps the saved place as the layout
+  // grows. Settling on a half-built layout would pick the wrong text to rest on.
+  if (!ready) return;
   const doc = currentDoc();
   const el = doc && scrollerOf(doc);
   if (!doc?.body || !el) return;
   const { stops } = stopsOf(doc);
-  const y = restingAt(doc) ?? el.scrollTop;
-  const stop = toEnd ? stops.at(-1) : stops[stopIndex(stops, y)];
-  if (stop) moveTo(doc, stop);
+  if (toEnd) pinnedEnd = doc;
+  const atEnd = pinnedEnd === doc;
+  const remembered = restingAt(doc);
+  const y = remembered ?? el.scrollTop;
+  const rest = endBack == null ? stops.findLast((st) => !st.tail) : stops[Math.max(0, stops.length - 1 - endBack)];
+  // With nothing remembered (a book just opened), the stop nearest to where foliate left the
+  // screen is the one it meant, whatever the line spacing.
+  const nearest = stops.reduce((best, st) => (Math.abs(st.at - y) < Math.abs(best.at - y) ? st : best), stops[0]);
+  const stop = atEnd ? rest : remembered == null ? nearest : stops[stopIndex(stops, y)];
+  if (stop) moveTo(doc, stop, { settling: true });
 }
 
 let settleFrame = 0;
@@ -686,7 +740,7 @@ function settleSoon() {
   if (settleFrame) return;
   settleFrame = requestAnimationFrame(() => {
     settleFrame = 0;
-    if (!changingChapter) settle();
+    if (!changingChapter && ready) settle();
   });
 }
 
@@ -694,7 +748,7 @@ function settleSoon() {
 function onScrollGuard(/** @type {Event} */ e) {
   if (twoUp()) return;
   const el = /** @type {HTMLElement} */ (e.currentTarget);
-  if (changingChapter || Math.abs(el.scrollTop - written) < 1.5) return;
+  if (!ready || changingChapter || Math.abs(el.scrollTop - written) < 1.5) return;
   settleSoon();
 }
 
@@ -724,14 +778,24 @@ async function changeChapter(/** @type {number} */ dir) {
   let index = current + dir;
   while (index >= 0 && index < sections.length && sections[index].linear === 'no') index += dir;
   if (index < 0 || index >= sections.length) return;
+  // Going on, note which screen the chapter is left from, so coming back lands on it.
+  const leaving = currentDoc();
+  const leavingEl = leaving && scrollerOf(leaving);
+  if (dir > 0 && leaving && leavingEl) {
+    const { stops } = stopsOf(leaving);
+    exits.set(current, stops.length - 1 - stopIndex(stops, leavingEl.scrollTop));
+  }
   changingChapter = true;
   resting = null;
+  pinnedEnd = null;
   try {
     await r.goTo({ index, anchor: dir > 0 ? 0 : 1 });
     await whenSized(currentDoc());
+    endBack = exits.get(index) ?? null;
     settle({ toEnd: dir < 0 });
   } finally {
     changingChapter = false;
+    wheelLocked = true;
   }
   // The new chapter's text size may change whether two columns fit; that was held off
   // while the chapter changed.
@@ -750,10 +814,28 @@ function stepLine(/** @type {number} */ dir) {
   const i = stopIndex(stops, s);
   if (dir > 0) {
     if (i + 1 < stops.length) moveTo(doc, stops[i + 1]);
-    else changeChapter(1);
+      else changeChapter(1);
   } else if (stops[i].at < s - 0.5) moveTo(doc, stops[i]);
-  else if (i > 0) moveTo(doc, stops[i - 1]);
-  else changeChapter(-1);
+    else if (i > 0) moveTo(doc, stops[i - 1]);
+      else changeChapter(-1);
+}
+
+/** The screens stepped through in each chapter, so Space and Left retrace exactly the same
+ * ones, even after leaving the chapter and coming back to it. A chapter's trail starts over
+ * only when its layout changes, or the reader rests somewhere the trail does not know. */
+/** @type {Map<number, { key: string, at: number[], i: number }>} */
+const trails = new Map();
+
+function trailHere(/** @type {Document} */ doc, /** @type {number} */ s) {
+  const index = view.renderer.getContents()[0]?.index ?? -1;
+  const key = `${Math.round(view.renderer.size)}|${Math.round(doc.body.getBoundingClientRect().height)}`;
+  let t = trails.get(index);
+  const i = t && t.key === key ? t.at.findIndex((a) => Math.abs(a - s) < 1) : -1;
+  if (!t || i < 0) {
+    t = { key, at: [s], i: 0 };
+    trails.set(index, t);
+  } else t.i = i;
+  return t;
 }
 
 /** One screen of lines on, never passing over a picture without stopping on it. */
@@ -766,20 +848,49 @@ function stepScreen(/** @type {number} */ dir) {
   /** @type {{ stops: Stop[], lines: Span[] }} */
   const { stops, lines } = stopsOf(doc);
   const s = el.scrollTop;
+  // A screen already stepped through is returned to exactly, whichever way you go.
+  const t = trailHere(doc, s);
+  const again = t.at[t.i + dir];
+  const replay = again == null ? undefined : stops.find((st) => Math.abs(st.at - again) < 0.5);
+  if (replay) {
+    t.i += dir;
+    return moveTo(doc, replay);
+  }
   if (dir > 0) {
     const ahead = stops.filter((st) => st.at > s + 0.5);
     if (!ahead.length) return changeChapter(1);
     // The first line not fully on screen goes to the top.
     const cut = lines.find((l) => l.bottom > s + H + 0.5);
-    const target = (cut ? ahead.findLast((st) => st.at <= cut.top + 0.5) : ahead.at(-1)) ?? ahead[0];
+    // All the text left is already on screen and no picture is ahead: on to the next chapter.
+    if (!cut && !ahead.some((st) => st.picture)) return changeChapter(1);
+    // The last line fully on screen stays, at the top, so the eye has something to land on.
+    // If that would not move at all (a screen of one line), the old step is used.
+    // Only text that is not on screen yet and comes before the next picture gets the overlap.
+    // When all of it is already showing, the next step is the picture itself.
+    const nextPicture = ahead.find((st) => st.picture);
+    const unseen = cut && (!nextPicture || cut.top < nextPicture.at - 0.5) ? cut : undefined;
+    const kept = unseen ? lines[lines.indexOf(unseen) - 1] : undefined;
+    const keep = kept ? ahead.findLast((st) => st.at <= kept.top + 0.5) : undefined;
+    const target = keep ?? (cut ? ahead.findLast((st) => st.at <= cut.top + 0.5) : ahead.at(-1)) ?? ahead[0];
     const picture = ahead.find((st) => st.picture && st.at <= target.at);
-    moveTo(doc, picture ?? target);
+    const dest = picture ?? target;
+    moveTo(doc, dest);
+    t.at.splice(t.i + 1, t.at.length, dest.at);
+    t.i++;
   } else {
     const behind = stops.filter((st) => st.at < s - 0.5);
     if (!behind.length) return changeChapter(-1);
-    const target = behind.find((st) => st.at >= s - H - 0.5) ?? /** @type {Stop} */ (behind.at(-1));
+    // Mirrors going on: the line at the top now was the last one fully on screen before.
+    const topLine = lines.find((l) => l.top >= s - 0.5);
+    const need = topLine ? topLine.bottom - H - 0.5 : s - H - 0.5;
+    // From a picture, back to the text before it as a whole screen (its last line at the
+    // bottom), never the one-line screens the forward tail steps pass through.
+    const onPicture = stops.some((st) => st.picture && Math.abs(st.at - s) < 1);
+    const target = (onPicture ? behind.findLast((st) => !st.tail) : behind.find((st) => st.at >= need)) ?? /** @type {Stop} */ (behind.at(-1));
     const picture = behind.findLast((st) => st.picture && st.at >= target.at);
-    moveTo(doc, picture ?? target);
+    const dest = picture ?? target;
+    moveTo(doc, dest);
+    t.at.splice(t.i, 0, dest.at);
   }
 }
 
@@ -868,6 +979,9 @@ function onKey(/** @type {KeyboardEvent} */ e) {
 const WHEEL_NOTCH = 50; // px: a single event this large is a mouse wheel notch
 const TOUCHPAD_LINE = 30; // px of touchpad travel per line
 let wheelTravel = 0;
+// After a chapter change, a touchpad's leftover momentum is ignored until a quiet moment.
+let wheelLocked = false;
+let lastWheel = 0;
 
 function onWheel(/** @type {WheelEvent} */ e) {
   // The picker's list scrolls as usual.
@@ -876,6 +990,13 @@ function onWheel(/** @type {WheelEvent} */ e) {
   if (e.ctrlKey || !view) return;
   const delta = e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY;
   if (!delta) return;
+  const now = performance.now();
+  const quiet = now - lastWheel > 150;
+  lastWheel = now;
+  if (wheelLocked) {
+    if (!quiet) return;
+    wheelLocked = false;
+  }
   if (twoUp()) return wheelSpread(delta);
   if (Math.abs(delta) >= WHEEL_NOTCH) {
     wheelTravel = 0;
@@ -990,7 +1111,9 @@ async function openBook() {
   }
   title = titleOf(book.metadata) || opened.file_name;
   appWindow.setTitle(title).catch(() => {});
-  positionKey = keyFor(book, opened.path);
+  // A library book is known by calibre's own uuid for it. Any other file keeps the old key.
+  const legacyKey = keyFor(book, opened.path);
+  positionKey = opened.book_uuid ? `uuid:${opened.book_uuid}` : legacyKey;
 
   book.transformTarget?.addEventListener('load', (/** @type {any} */ e) => {
     if (e.detail.isScript) e.detail.allow = false;
@@ -1000,11 +1123,16 @@ async function openBook() {
   });
 
   const [saved] = await Promise.all([
-    invoke('reader_position', { key: positionKey }).catch(() => null),
+    // A place saved under the old key is picked up once, and saved under the new key from then on.
+    invoke('reader_position', { key: positionKey })
+      .then((p) => p ?? (positionKey === legacyKey ? null : invoke('reader_position', { key: legacyKey })))
+      .catch(() => null),
     invoke('reader_settings').then((s) => (settings = /** @type {any} */ (s))).catch(() => {}),
   ]);
   appliedStep = settings.font_step;
 
+  exits.clear();
+  trails.clear();
   view = document.createElement('foliate-view');
   view.addEventListener('load', (/** @type {any} */ e) => {
     const doc = e.detail.doc;
@@ -1024,9 +1152,16 @@ async function openBook() {
   view.addEventListener('relocate', (/** @type {any} */ e) => {
     const { fraction, cfi, reason } = e.detail;
     // A link followed inside the book is a new place to read from, not a scroll to undo.
-    if (reason === 'navigation' && !changingChapter) resting = null;
-    if (typeof fraction === 'number') percent = Math.round(fraction * 100);
-    if (ready && cfi) savePositionSoon(cfi, fraction ?? 0);
+    if (reason === 'navigation' && !changingChapter) {
+      resting = null;
+      pinnedEnd = null;
+    }
+    if (typeof fraction === 'number') {
+      percent = Math.round(fraction * 100);
+      lastFraction = fraction;
+    }
+    // In one column the reader saves the place itself (see moveTo). With two columns, foliate turns the pages.
+    if (ready && cfi && twoUp()) savePositionSoon(cfi, fraction ?? 0);
   });
   readingEl.append(view);
   await view.open(book);
@@ -1041,8 +1176,8 @@ async function openBook() {
   await whenSized(currentDoc());
   // Now that a chapter is showing, the parts of the layout set from inside foliate can be set too.
   applyLayout();
-  settle();
   ready = true;
+  settle();
 }
 
 onMount(() => {
@@ -1126,7 +1261,7 @@ onMount(() => {
 }
 .reading.fullscreen { border-top: none; }
 /* Two columns: foliate leaves the same space at the outer edges as between its pages, so its
-   area reaches past the edges by the difference (see applyLayout). */
+area reaches past the edges by the difference (see applyLayout). */
 .reading.two :global(foliate-view) {
   width: auto;
   margin: 0 calc(-1 * var(--pull-right)) 0 calc(-1 * var(--pull-left));

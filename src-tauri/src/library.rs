@@ -393,6 +393,13 @@ pub fn epub_path(conn: &Connection, library_path: &str, book_id: i64) -> rusqlit
     .optional()
 }
 
+/// calibre's own uuid for a book, if it has one.
+pub fn book_uuid(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT uuid FROM books WHERE id = ?1", [book_id], |row| row.get::<_, Option<String>>(0))
+        .optional()
+        .map(|found| found.flatten().filter(|u| !u.trim().is_empty()))
+}
+
 pub fn open_library(library_path: &str) -> rusqlite::Result<Connection> {
     let db_path = PathBuf::from(library_path).join("metadata.db");
     // Read-only for everything except saving edits

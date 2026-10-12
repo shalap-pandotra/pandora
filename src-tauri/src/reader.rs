@@ -1,13 +1,9 @@
-// The book reader. Each book opens in its own window, labelled "reader-N". Rust keeps the
-// EPUB open as a zip archive and hands out single entries on request through the "book"
-// protocol, so the webview never holds the whole file.
-
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 use tauri::http::{header, Request, Response, StatusCode};
@@ -22,6 +18,8 @@ pub struct ReaderState {
     // The file each window shows, kept for as long as the window lives. If its page is
     // loaded again (a reload), it opens the same book again rather than finding nothing.
     files: Mutex<HashMap<String, PathBuf>>,
+    // The calibre uuid of the book each window shows, when it came from a library.
+    uuids: Mutex<HashMap<String, String>>,
     open: Mutex<HashMap<String, Archive>>,
     // Read from disk the first time they are needed.
     settings: Mutex<Option<Settings>>,
@@ -39,15 +37,19 @@ pub struct OpenedBook {
     path: String,
     file_name: String,
     entries: Vec<Entry>,
+    book_uuid: Option<String>,
 }
 
 pub const PROTOCOL: &str = "book";
 
 /// Opens a reader window for the file at `path`. The window loads the file itself once it is ready.
-pub fn open_window(app: &AppHandle, path: PathBuf) -> Result<(), String> {
+pub fn open_window(app: &AppHandle, path: PathBuf, uuid: Option<String>) -> Result<(), String> {
     let state = app.state::<ReaderState>();
     let label = format!("reader-{}", state.next_id.fetch_add(1, Ordering::Relaxed) + 1);
-    state.files.lock().unwrap().insert(label.clone(), path);
+    if let Some(uuid) = uuid {
+        state.uuids.lock().unwrap().insert(label.clone(), uuid);
+    }
+    state.files.lock().unwrap_or_else(PoisonError::into_inner).insert(label.clone(), path);
     let built = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("reader".into()))
         .title("Pandora Reader")
         .decorations(false)
@@ -55,7 +57,8 @@ pub fn open_window(app: &AppHandle, path: PathBuf) -> Result<(), String> {
         .min_inner_size(400.0, 400.0)
         .build();
     if let Err(e) = built {
-        state.files.lock().unwrap().remove(&label);
+        state.uuids.lock().unwrap().remove(&label);
+        state.files.lock().unwrap_or_else(PoisonError::into_inner).remove(&label);
         return Err(e.to_string());
     }
     Ok(())
@@ -64,7 +67,7 @@ pub fn open_window(app: &AppHandle, path: PathBuf) -> Result<(), String> {
 /// Opens the file this window was created for and lists its entries.
 pub fn load(app: &AppHandle, label: &str) -> Result<OpenedBook, String> {
     let state = app.state::<ReaderState>();
-    let path = state.files.lock().unwrap().get(label).cloned().ok_or("No book for this window")?;
+    let path = state.files.lock().unwrap_or_else(PoisonError::into_inner).get(label).cloned().ok_or("No book for this window")?;
     let file = File::open(&path).map_err(|e| e.to_string())?;
     let mut archive = ZipArchive::new(file).map_err(|e| e.to_string())?;
     let mut entries = Vec::with_capacity(archive.len());
@@ -81,28 +84,39 @@ pub fn load(app: &AppHandle, label: &str) -> Result<OpenedBook, String> {
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    state.open.lock().unwrap().insert(label.to_string(), Arc::new(Mutex::new(archive)));
-    Ok(OpenedBook { path: path.to_string_lossy().to_string(), file_name, entries })
+    state.open.lock().unwrap_or_else(PoisonError::into_inner).insert(label.to_string(), Arc::new(Mutex::new(archive)));
+    let book_uuid = state.uuids.lock().unwrap().get(label).cloned();
+    Ok(OpenedBook { path: path.to_string_lossy().to_string(), file_name, entries, book_uuid })
 }
 
 /// Gives a window that already has a book open another file, once it has been checked
 /// to open. The window then loads it the same way as its first one. A file that does not
 /// open is refused here, so the book being read stays open.
-pub fn replace(app: &AppHandle, label: &str, path: PathBuf) -> Result<(), String> {
+pub fn replace(app: &AppHandle, label: &str, path: PathBuf, uuid: Option<String>) -> Result<(), String> {
     if !path.is_file() {
         return Err("That file is missing".to_string());
     }
     let file = File::open(&path).map_err(|e| e.to_string())?;
     ZipArchive::new(file).map_err(|_| "That file isn't a readable EPUB".to_string())?;
-    app.state::<ReaderState>().files.lock().unwrap().insert(label.to_string(), path);
+    {
+        let state = app.state::<ReaderState>();
+        let mut uuids = state.uuids.lock().unwrap();
+        if let Some(uuid) = uuid {
+            uuids.insert(label.to_string(), uuid);
+        } else {
+            uuids.remove(label);
+        }
+    }
+    app.state::<ReaderState>().files.lock().unwrap_or_else(PoisonError::into_inner).insert(label.to_string(), path);
     Ok(())
 }
 
 /// Lets go of everything held for a window once it is gone.
 pub fn forget(app: &AppHandle, label: &str) {
+    app.state::<ReaderState>().uuids.lock().unwrap().remove(label);
     let state = app.state::<ReaderState>();
-    state.files.lock().unwrap().remove(label);
-    state.open.lock().unwrap().remove(label);
+    state.files.lock().unwrap_or_else(PoisonError::into_inner).remove(label);
+    state.open.lock().unwrap_or_else(PoisonError::into_inner).remove(label);
 }
 
 /// Serves `book://localhost/<window label>/<entry name>`, with the whole path percent-encoded.
@@ -111,12 +125,19 @@ pub fn protocol(ctx: UriSchemeContext<'_, Wry>, request: Request<Vec<u8>>, respo
     let raw = request.uri().path().trim_start_matches('/').to_string();
     std::thread::spawn(move || {
         let decoded = percent_encoding::percent_decode_str(&raw).decode_utf8_lossy().to_string();
-        let response = match decoded.split_once('/') {
+        // However the lookup goes, the page gets an answer. A panic here would otherwise
+        // leave its request waiting forever.
+        let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match decoded.split_once('/') {
             Some((label, name)) => read_entry(&app, label, name),
             None => Err(StatusCode::BAD_REQUEST),
-        };
+        }))
+        .unwrap_or(Err(StatusCode::INTERNAL_SERVER_ERROR));
         responder.respond(response.unwrap_or_else(|status| {
-            Response::builder().status(status).body(Vec::new()).unwrap()
+            Response::builder()
+                .status(status)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .body(Vec::new())
+                .unwrap()
         }));
     });
 }
@@ -126,14 +147,24 @@ fn read_entry(app: &AppHandle, label: &str, name: &str) -> Result<Response<Vec<u
         .state::<ReaderState>()
         .open
         .lock()
-        .unwrap()
+        .unwrap_or_else(PoisonError::into_inner)
         .get(label)
         .cloned()
         .ok_or(StatusCode::NOT_FOUND)?;
-    let mut archive = archive.lock().unwrap();
+    let mut archive = archive.lock().unwrap_or_else(PoisonError::into_inner);
     let mut entry = archive.by_name(name).map_err(|_| StatusCode::NOT_FOUND)?;
-    let mut data = Vec::with_capacity(entry.size() as usize);
-    entry.read_to_end(&mut data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // The size in a zip header is only a claim. It is never trusted for the allocation, and
+    // reading stops at a sane limit however far the entry inflates.
+    const MAX_ENTRY: u64 = 256 * 1024 * 1024;
+    let mut data = Vec::with_capacity(entry.size().min(16 * 1024 * 1024) as usize);
+    entry
+        .by_ref()
+        .take(MAX_ENTRY + 1)
+        .read_to_end(&mut data)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if data.len() as u64 > MAX_ENTRY {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
     Response::builder()
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -200,11 +231,20 @@ fn data_file(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
 }
 
 fn read_json<T: serde::de::DeserializeOwned + Default>(app: &AppHandle, name: &str) -> T {
-    data_file(app, name)
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let Ok(path) = data_file(app, name) else { return T::default() };
+    let parsed = match std::fs::read_to_string(&path) {
+        // Nothing saved yet is normal.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return T::default(),
+        Err(e) => Err(e.to_string()),
+        Ok(text) => serde_json::from_str::<T>(&text).map_err(|e| e.to_string()),
+    };
+    parsed.unwrap_or_else(|why| {
+        // The file is there but unusable. A copy is kept before the next save replaces it,
+        // so one bad moment does not cost every saved position.
+        eprintln!("{name} could not be read ({why}); keeping a copy as {name}.bak");
+        let _ = std::fs::copy(&path, path.with_extension("json.bak"));
+        T::default()
+    })
 }
 
 // Written to a temporary file first, so a crash mid-write never leaves a broken file.
@@ -221,7 +261,7 @@ const POSITIONS_FILE: &str = "reader-positions.json";
 
 pub fn settings(app: &AppHandle) -> Settings {
     let state = app.state::<ReaderState>();
-    let mut cached = state.settings.lock().unwrap();
+    let mut cached = state.settings.lock().unwrap_or_else(PoisonError::into_inner);
     cached.get_or_insert_with(|| read_json::<Settings>(app, SETTINGS_FILE).clamped()).clone()
 }
 
@@ -230,7 +270,7 @@ pub fn set_settings(app: &AppHandle, from: &str, settings: Settings) -> Result<S
     let settings = settings.clamped();
     let state = app.state::<ReaderState>();
     {
-        let mut cached = state.settings.lock().unwrap();
+        let mut cached = state.settings.lock().unwrap_or_else(PoisonError::into_inner);
         if cached.as_ref() == Some(&settings) {
             return Ok(settings);
         }
@@ -243,13 +283,13 @@ pub fn set_settings(app: &AppHandle, from: &str, settings: Settings) -> Result<S
 
 pub fn position(app: &AppHandle, key: &str) -> Option<Position> {
     let state = app.state::<ReaderState>();
-    let mut cached = state.positions.lock().unwrap();
+    let mut cached = state.positions.lock().unwrap_or_else(PoisonError::into_inner);
     cached.get_or_insert_with(|| read_json(app, POSITIONS_FILE)).get(key).cloned()
 }
 
 pub fn set_position(app: &AppHandle, key: String, position: Position) -> Result<(), String> {
     let state = app.state::<ReaderState>();
-    let mut cached = state.positions.lock().unwrap();
+    let mut cached = state.positions.lock().unwrap_or_else(PoisonError::into_inner);
     let all = cached.get_or_insert_with(|| read_json(app, POSITIONS_FILE));
     all.insert(key, position);
     write_json(app, POSITIONS_FILE, all)

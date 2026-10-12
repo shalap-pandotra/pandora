@@ -271,7 +271,8 @@ async fn open_book(app: tauri::AppHandle, book_id: i64, state: State<'_, AppStat
     if !path.is_file() {
         return Err("The EPUB file is missing from the library folder".to_string());
     }
-    reader::open_window(&app, path)
+    let uuid = with_conn(&state, |conn| library::book_uuid(conn, book_id).map_err(|e| e.to_string()))?;
+    reader::open_window(&app, path, uuid)
 }
 
 // A reader window that cannot open its file closes without a word.
@@ -311,17 +312,19 @@ fn reader_replace(
     book_id: Option<i64>,
     path: Option<String>,
 ) -> Result<(), String> {
-    let path = match (book_id, path) {
+    let (path, uuid) = match (book_id, path) {
         (Some(id), _) => {
             let (library, conn) = reader_library(&app, &state)?;
-            library::epub_path(&conn, &library, id)
+            let path = library::epub_path(&conn, &library, id)
                 .map_err(|e| e.to_string())?
-                .ok_or("This book has no EPUB")?
+                .ok_or("This book has no EPUB")?;
+            let uuid = library::book_uuid(&conn, id).map_err(|e| e.to_string())?;
+            (path, uuid)
         }
-        (None, Some(path)) => std::path::PathBuf::from(path),
+        (None, Some(path)) => (std::path::PathBuf::from(path), None),
         (None, None) => return Err("No book was chosen".to_string()),
     };
-    reader::replace(&app, window.label(), path)
+    reader::replace(&app, window.label(), path, uuid)
 }
 
 /// Once the library window is gone, everything the library held is let go: the open
