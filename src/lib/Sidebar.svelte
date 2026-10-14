@@ -1,9 +1,10 @@
 <script>
 import { invoke } from '@tauri-apps/api/core';
-import { onMount } from 'svelte';
-import  VirtualList  from './VirtualList.svelte';
+import { onMount, untrack } from 'svelte';
+import GroupedList from './GroupedList.svelte';
+import { letterGroups } from './letterGroups.js';
 
-let { onFilterChange, onReset, libraryLoaded, onEditMetadata, refreshKey } = $props();
+let { onFilterChange, onReset, libraryLoaded, onEditMetadata, refreshKey, libraryKey } = $props();
 let authors = $state([]);
 let series = $state([]);
 let tags = $state([]);
@@ -18,6 +19,43 @@ let authorsExpanded = $state(false);
 let seriesExpanded = $state(false);
 let tagsExpanded = $state(false);
 let expandedColumns = $state(new Set());
+
+let openTagGroups = $state(new Set());
+const tagGroups = $derived(tags.length > 100 ? letterGroups(tags) : null);
+function toggleTagGroup(label) {
+  const next = new Set(openTagGroups);
+  if (!next.delete(label)) next.add(label);
+  openTagGroups = next;
+}
+// A chosen tag must not hide inside a closed group.
+$effect(() => {
+  if (!tagGroups || activeTag === null) return;
+  const group = tagGroups.find((g) => g.rows.some((t) => t.id === activeTag));
+  if (group && !untrack(() => openTagGroups.has(group.label))) openTagGroups = new Set([...untrack(() => openTagGroups), group.label]);
+});
+
+// Pointing the app at another library starts clean: no filter chosen, nothing open.
+let seenLibrary;
+let libraryKnown = false;
+$effect(() => {
+  const key = libraryKey;
+  if (!libraryKnown) {
+    libraryKnown = true;
+    seenLibrary = key;
+    return;
+  }
+  if (key === seenLibrary) return;
+  seenLibrary = key;
+  untrack(() => {
+    activeAuthor = null;
+    activeSeries = null;
+    activeTag = null;
+    activeCustomValue = null;
+    expandedNodes = new Set();
+    expandedColumns = new Set();
+    openTagGroups = new Set();
+  });
+});
 
 let columnTrees = $derived(
   multiTextColumns.map((col) => ({ ...col,  tree: buildTree(col.values, col.is_hierarchical)}))
@@ -191,18 +229,9 @@ const tools = [
     </button>
     {#if authorsExpanded}
       <div class="stack">
-        <VirtualList items={authors} itemHeight={32}>
-          {#snippet row(author)}
-            <button
-              class="zen-btn filter-row"
-              class:active={activeAuthor === author.id}
-              onclick={() => toggleAuthor(author.id)}
-            >
-              <span class="filter-name">{author.name}</span>
-              <span class="filter-count">{author.count}</span>
-            </button>
-          {/snippet}
-        </VirtualList>
+        {#key libraryKey}
+          <GroupedList rows={authors} activeId={activeAuthor} onToggle={toggleAuthor} />
+        {/key}
       </div>
     {/if}
   </div>
@@ -214,16 +243,9 @@ const tools = [
     </button>
     {#if seriesExpanded}
       <div class="stack">
-        {#each series as row (row.id)}
-          <button
-            class="zen-btn filter-row"
-            class:active={activeSeries === row.id}
-            onclick={() => toggleSeries(row.id)}
-          >
-            <span>{row.name}</span>
-            <span class="filter-count">{row.count}</span>
-          </button>
-        {/each}
+        {#key libraryKey}
+          <GroupedList rows={series} activeId={activeSeries} onToggle={toggleSeries} />
+        {/key}
       </div>
     {/if}
   </div>
@@ -234,17 +256,42 @@ const tools = [
       <span class="section-chevron">{tagsExpanded ? '−' : '+'}</span>
     </button>
     {#if tagsExpanded}
-      <div class="tag-row">
-        {#each tags as row (row.id)}
-          <button
-            class="zen-btn tag-pill"
-            class:active={activeTag === row.id}
-            onclick={() => toggleTag(row.id)}
-          >
-            {row.name}
+      {#if tagGroups}
+        {#each tagGroups as group (group.label)}
+          <button class="zen-btn group-head" onclick={() => toggleTagGroup(group.label)}>
+            <span class="group-label">{group.label}</span>
+            <span class="group-meta">
+              <span class="filter-count">{group.rows.length}</span>
+              <span class="group-chevron">{openTagGroups.has(group.label) ? '−' : '+'}</span>
+            </span>
           </button>
+          {#if openTagGroups.has(group.label)}
+            <div class="tag-row group-tags">
+              {#each group.rows as row (row.id)}
+                <button
+                  class="zen-btn tag-pill"
+                  class:active={activeTag === row.id}
+                  onclick={() => toggleTag(row.id)}
+                >
+                  {row.name}
+                </button>
+              {/each}
+            </div>
+          {/if}
         {/each}
-      </div>
+      {:else}
+        <div class="tag-row">
+          {#each tags as row (row.id)}
+            <button
+              class="zen-btn tag-pill"
+              class:active={activeTag === row.id}
+              onclick={() => toggleTag(row.id)}
+            >
+              {row.name}
+            </button>
+          {/each}
+        </div>
+      {/if}
     {/if}
   </div>
 
@@ -374,12 +421,6 @@ const tools = [
   text-align: left;
   width: 100%;
 }
-.filter-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .filter-row:hover {
   background: #F7C7CE;
 }
@@ -390,6 +431,23 @@ const tools = [
 }
 .filter-count { font-size: 11px; color: var(--zen-count); flex: none; }
 .tag-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 30px;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border-radius: 2px;
+  width: 100%;
+  text-align: left;
+}
+.group-head:hover { background: var(--zen-pill-bg); }
+.group-label { font-size: 12px; font-weight: 600; color: var(--zen-ink); }
+.group-meta { display: flex; align-items: center; gap: 10px; }
+.group-chevron { font-size: 14px; color: var(--zen-text-faint); width: 10px; text-align: center; }
+.group-tags { padding: 4px 8px 10px; }
 .tag-pill {
   padding: 5px 10px;
   border-radius: 999px;

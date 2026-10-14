@@ -7,6 +7,7 @@ mod reader;
 
 use std::sync::Mutex;
 use tauri::State;
+use tauri::Emitter;
 use tauri::Manager;
 use rusqlite::Connection;
 
@@ -257,6 +258,12 @@ async fn save_metadata_batch(
             .map_err(|e| library::BatchError { book_id: None, message: e.to_string() })?;
         let moves = library::write_metadata_batch(&mut conn, &path, &items)?;
         log_renames(&app_for_log, &path, &moves);
+        // Tell the open reader windows, so a book's title changes there at once.
+        for it in &items {
+            if let Ok(Some((uuid, title))) = library::book_uuid_and_title(&conn, it.book_id) {
+                let _ = app_for_log.emit("book-title-changed", serde_json::json!({ "uuid": uuid, "title": title }));
+            }
+        }
         Ok(())
     })
     .await
@@ -275,12 +282,22 @@ async fn open_book(app: tauri::AppHandle, book_id: i64, state: State<'_, AppStat
     reader::open_window(&app, path, uuid)
 }
 
-// A reader window that cannot open its file closes without a word.
 #[tauri::command]
-fn reader_load(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<reader::OpenedBook, String> {
-    reader::load(&app, window.label()).inspect_err(|_| {
-        let _ = window.destroy();
-    })
+fn reader_load(app: tauri::AppHandle, state: State<AppState>, window: tauri::WebviewWindow) -> Result<reader::OpenedBook, String> {
+    let mut opened = reader::load(&app, window.label())?;
+    // A book from a library shows the library's title, which edits in Pandora change, and not the
+    // title written inside the file.
+    if let Some(uuid) = opened.book_uuid().map(str::to_string) {
+        let title = with_conn(&state, |conn| library::book_title_by_uuid(conn, &uuid).map_err(|e| e.to_string())).ok().flatten();
+        opened.set_book_title(title);
+    }
+    Ok(opened)
+}
+
+/// Puts a window back on the book it had before its last swap, when the new one would not open.
+#[tauri::command]
+fn reader_revert(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+    reader::revert(&app, window.label())
 }
 
 /// The library the reader's picker shows: the one open in Pandora, or else the last one used.
@@ -381,6 +398,7 @@ fn main() {
         // Must come first, so a second launch is caught before anything else starts.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_library(app)))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(reader::ReaderState::default())
         .register_asynchronous_uri_scheme_protocol(reader::PROTOCOL, reader::protocol)
         .on_window_event(|window, event| {
@@ -419,7 +437,8 @@ fn main() {
             reader_position,
             save_reader_position,
             reader_library_books,
-            reader_replace
+            reader_replace,
+            reader_revert
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

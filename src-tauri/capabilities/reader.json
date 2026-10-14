@@ -1,0 +1,26 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "reader",
+  "description": "Capability for the reader windows",
+  "windows": ["reader-*"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-destroy",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-title",
+    "core:window:allow-set-fullscreen",
+    "dialog:default",
+    "allow-reader-load",
+    "allow-reader-revert",
+    "allow-reader-replace",
+    "allow-reader-settings",
+    "allow-set-reader-settings",
+    "allow-reader-position",
+    "allow-save-reader-position",
+    "allow-reader-library-books"
+  ]
+}

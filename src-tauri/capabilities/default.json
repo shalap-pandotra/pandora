@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the library window and the reader windows",
-  "windows": ["main", "reader-*"],
+  "description": "Capability for the library window",
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "opener:default",
@@ -13,6 +13,21 @@
     "core:window:allow-start-dragging",
     "core:window:allow-set-title",
     "core:window:allow-set-fullscreen",
-    "dialog:default"
+    "dialog:default",
+    "allow-set-library-path",
+    "allow-get-authors",
+    "allow-get-series",
+    "allow-get-tags",
+    "allow-get-books-filtered",
+    "allow-get-multi-text-columns",
+    "allow-get-comments",
+    "allow-get-next-series-index",
+    "allow-save-metadata-batch",
+    "allow-get-custom-editor",
+    "allow-get-edit-extras",
+    "allow-preview-cover",
+    "allow-save-last-library-path",
+    "allow-load-last-library-path",
+    "allow-open-book"
   ]
 }

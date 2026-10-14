@@ -39,9 +39,10 @@ let rafPending = false;
 let dragOffset = 0;
 
 let requestSeq = 0;
+let allBooks = null;
 
 onMount(() => {
-  const state = new WeakMap(); // el -> { current, target, rafId, timer }
+  const state = new WeakMap(); // el -> { current, target, rafId, timer, edge }
 
   function tick(el) {
     const s = state.get(el);
@@ -58,27 +59,60 @@ onMount(() => {
     }
   }
 
-  function handleScroll(e) {
-    const el = e.target;
-    if (!(el instanceof HTMLElement)) return;
-
+  function showBar(el, nearEdge = false) {
     let s = state.get(el);
     if (!s) {
-      s = { current: 0, target: 0, rafId: null, timer: null };
+      s = { current: 0, target: 0, rafId: null, timer: null, edge: false };
       state.set(el, s);
     }
-
+    s.edge = nearEdge;
     s.target = 1;
     if (!s.rafId) s.rafId = requestAnimationFrame(() => tick(el));
 
     clearTimeout(s.timer);
-    s.timer = setTimeout(() => {
+    s.timer = setTimeout(function hide() {
+      if (s.edge && el.matches(':hover')) {
+        s.timer = setTimeout(hide, 700);
+        return;
+      }
       s.target = 0;
       if (!s.rafId) s.rafId = requestAnimationFrame(() => tick(el));
     }, 700);
   }
 
+  function handleScroll(e) {
+    const el = e.target;
+    if (!(el instanceof HTMLElement)) return;
+    // A scroll with the pointer on the bar keeps it there, so the edge state is left as it was.
+    showBar(el, state.get(el)?.edge ?? false);
+  }
+
+  /** The nearest scroll area at or above an element. */
+  function scrollerAt(el) {
+    for (let node = el; node && node !== document.body; node = node.parentElement) {
+      if (!(node instanceof HTMLElement)) continue;
+      const oy = getComputedStyle(node).overflowY;
+      if ((oy === 'auto' || oy === 'scroll') && node.scrollHeight > node.clientHeight + 1) return node;
+    }
+    return null;
+  }
+
+  let moveFrame = 0;
+  let lastMove = null;
+  function handlePointerMove(e) {
+    lastMove = e;
+    if (moveFrame) return;
+    moveFrame = requestAnimationFrame(() => {
+      moveFrame = 0;
+      const el = lastMove?.target instanceof Element ? scrollerAt(lastMove.target) : null;
+      if (!el) return;
+      const bar = el.offsetWidth - el.clientWidth;
+      showBar(el, lastMove.clientX >= el.getBoundingClientRect().right - bar - 24);
+    });
+  }
+
   document.addEventListener('scroll', handleScroll, true);
+  document.addEventListener('pointermove', handlePointerMove, true);
 
   function handleKeydown(e) {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'o') {
@@ -116,6 +150,8 @@ onMount(() => {
 
   return () => {
     document.removeEventListener('scroll', handleScroll, true);
+    document.removeEventListener('pointermove', handlePointerMove, true);
+    cancelAnimationFrame(moveFrame);
     window.removeEventListener('keydown', handleKeydown);
     unlistenClose?.();
   };
@@ -138,10 +174,19 @@ $effect(() => {
   return () => resizeObserver.disconnect();
 });
 
+function isWholeLibrary(f) {
+  return f.author_id == null && f.series_id == null && f.tag_id == null && !f.search && f.custom_column_id == null && f.custom_value_id == null;
+}
+
 async function refreshBooks(keepId = null) {
   const seq = ++requestSeq;
-  const result = await invoke('get_books_filtered', { filter: currentFilter });
-  if (seq !== requestSeq) return; // a newer request already started, discard this stale one
+  const whole = isWholeLibrary(currentFilter);
+  let result = whole ? allBooks : null;
+  if (!result) {
+    result = await invoke('get_books_filtered', { filter: currentFilter });
+    if (seq !== requestSeq) return; 
+    if (whole) allBooks = result;
+  }
   books = result;
   selectedBook = (keepId !== null && books.find((b) => b.id === keepId)) || (books.length ? books[0] : null);
 }
@@ -225,6 +270,7 @@ async function handleSave(entry) {
   }
   closeEditor();
   sidebarVersion += 1;
+  allBooks = null; 
   await refreshBooks(current);
 }
 
@@ -292,15 +338,20 @@ async function pickLibraryFolder() {
 
 async function openLibrary() {
   try {
+    allBooks = null;
     await invoke('set_library_path', { path: libraryPath });
-    await invoke('get_books_filtered', { filter: { author_id: null, series_id: null, tag_id: null, search: null, custom_column_id: null, custom_value_id: null } });
+    allBooks = await invoke('get_books_filtered', { filter: { author_id: null, series_id: null, tag_id: null, search: null, custom_column_id: null, custom_value_id: null } });
   } catch (e) {
     console.error('Failed to open library at this path:', e);
     return; // bail before saving, don't persist a path that doesn't actually work
   }
 
   await invoke('save_last_library_path', { path: libraryPath });
+  const switching = libraryLoaded;
+  currentFilter = { author_id: null, series_id: null, tag_id: null, search: null, custom_column_id: null, custom_value_id: null };
+  searchTerm = '';
   libraryLoaded = true;
+  if (switching) sidebarVersion += 1;
   await refreshBooks();
 }
 
@@ -326,7 +377,7 @@ async function openLibrary() {
 <div class="frame" inert={editingBook != null}>
   <TopBar />
   <div class="body-row">
-    <Sidebar onFilterChange={handleFilterChange} onReset={handleReset} libraryLoaded={libraryLoaded} onEditMetadata={openEditor} refreshKey={sidebarVersion} />
+    <Sidebar onFilterChange={handleFilterChange} onReset={handleReset} libraryLoaded={libraryLoaded} onEditMetadata={openEditor} refreshKey={sidebarVersion} libraryKey={libraryPath} />
     <div class="main-col" bind:this={mainColEl}>
       <PreviewPanel bind:this={previewPanel} book={selectedBook} libraryLoaded={libraryLoaded} onEdit={openEditor} />
       <!-- svelte-ignore a11y_no_noninteractive_tabindex -->

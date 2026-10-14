@@ -16,7 +16,7 @@ const SIDES = [
 /** @type {Record<string, string>} */
 let drafts = $state({});
 /** @type {Record<string, HTMLInputElement>} */
-let inputs = {};
+let inputs = $state({});
 
 // Values changed elsewhere (another window, or a clamp) show up in every box but the one being typed in.
 $effect(() => {

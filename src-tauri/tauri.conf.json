@@ -22,6 +22,19 @@
       }
     ],
     "security": {
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline' blob:",
+        "img-src": "'self' asset: http://asset.localhost blob: data:",
+        "font-src": "'self' data: blob:",
+        "media-src": "blob:",
+        "connect-src": "ipc: http://ipc.localhost book: http://book.localhost",
+        "frame-src": "blob:",
+        "object-src": "'none'",
+        "base-uri": "'self'",
+        "form-action": "'none'"
+      },
       "assetProtocol":{
         "enable": true,
         "scope": ["**/cover.jpg"]

@@ -7,6 +7,7 @@ import { onMount, tick } from 'svelte';
 import TopBar from '../../lib/TopBar.svelte';
 import ReaderSettings from '../../lib/ReaderSettings.svelte';
 import ReaderPicker from '../../lib/ReaderPicker.svelte';
+import LinkPreview from '../../lib/LinkPreview.svelte';
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 import { EPUB } from '../../lib/foliate/epub.js';
 import '../../lib/foliate/view.js';
@@ -24,6 +25,7 @@ const MIN_TEXT_HEIGHT = 120;
 const PERCENT_ROOM = 20;
 
 let title = $state('');
+let bookUuid = '';
 let percent = $state(/** @type {number | null} */ (null));
 /** The book fraction foliate last reported. It is saved beside the place, for information only. */
 let lastFraction = 0;
@@ -41,8 +43,14 @@ let readingEl = $state();
 let view;
 let positionKey = '';
 let ready = false;
+let backSpot = $state(/** @type {string | null} */ (null));
+let holdSaves = false;
+let outside = $state(/** @type {{ href: string, host: string, mail: boolean } | null} */ (null));
+let notice = $state('');
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let noticeTimer;
+let links = $state(/** @type {any} */ (null));
 
-// What is applied, after the quiet clamps that depend on the window's size.
 let inset = $derived.by(() => {
   let { top, right, bottom, left } = settings.padding;
   bottom = Math.max(bottom, PERCENT_ROOM);
@@ -138,11 +146,30 @@ function stepFont(/** @type {number} */ delta) {
 
 // ---- Settings, shared with every other reader window
 
-function saveSettings(/** @type {typeof settings} */ next) {
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let settingsTimer;
+let settingsSeq = 0;
+
+/**
+ * Applies new settings here at once and saves them. A burst of changes, like typing in a padding
+ * box, is saved once when it pauses (pass a wait), so it is not written to disk on every key.
+ */
+function saveSettings(/** @type {typeof settings} */ next, wait = 0) {
   settings = next;
-  invoke('set_reader_settings', { settings: next })
+  settingsSeq++;
+  clearTimeout(settingsTimer);
+  if (wait) settingsTimer = setTimeout(flushSettings, wait);
+    else flushSettings();
+}
+
+function flushSettings() {
+  clearTimeout(settingsTimer);
+  settingsTimer = undefined;
+  const seq = settingsSeq;
+  return invoke('set_reader_settings', { settings: $state.snapshot(settings) })
     .then((stored) => {
-      if (JSON.stringify(stored) !== JSON.stringify(settings)) settings = /** @type {any} */ (stored);
+      // Only the reply to the newest change may replace what is shown here.
+      if (seq === settingsSeq && JSON.stringify(stored) !== JSON.stringify(settings)) settings = /** @type {any} */ (stored);
     })
     .catch((e) => console.error('Could not save the reader settings:', e));
 }
@@ -191,7 +218,11 @@ function whenSized(/** @type {Document | undefined} */ doc) {
   if (!doc?.body) return Promise.resolve();
   // The book's own fonts count too: they reflow every line once they arrive.
   const pending = [...doc.body.querySelectorAll('img')].map((img) => waiting.get(img));
-  return Promise.all([doc.fonts?.ready, ...pending].filter(Boolean));
+  const all = Promise.all([doc.fonts?.ready, ...pending].filter(Boolean));
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let timer;
+  const limit = new Promise((done) => (timer = setTimeout(done, 4000)));
+  return Promise.race([all, limit]).finally(() => clearTimeout(timer));
 }
 /** Natural sizes read ahead of the images themselves loading. */
 const sizes = new WeakMap();
@@ -683,9 +714,9 @@ function restingCfi() {
   try {
     const range = doc.createRange();
     if (resting.start) range.setStart(doc.body, 0);
-    else if (resting.picture) range.setStart(resting.picture, 0);
-    else if (resting.node?.isConnected) range.setStart(resting.node, resting.offset ?? 0);
-    else return null;
+      else if (resting.picture) range.setStart(resting.picture, 0);
+        else if (resting.node?.isConnected) range.setStart(resting.node, resting.offset ?? 0);
+          else return null;
     range.collapse(true);
     return view.getCFI(index, range);
   } catch {
@@ -697,13 +728,16 @@ function restingCfi() {
 function moveTo(/** @type {Document} */ doc, /** @type {Stop} */ stop, /** @type {{ settling?: boolean }} */ { settling = false } = {}) {
   const el = scrollerOf(doc);
   if (!el) return;
-  if (!settling) pinnedEnd = null;
+  if (!settling) {
+    pinnedEnd = null;
+    holdSaves = false;
+  }
   showPictures(doc, stop.at);
   el.scrollTop = stop.at;
   written = el.scrollTop;
   coverCutLine(doc, stop.at);
   remember(doc, stop);
-  if (ready) {
+  if (ready && !holdSaves) {
     const own = restingCfi();
     if (own) savePositionSoon(own, lastFraction);
   }
@@ -728,14 +762,143 @@ function settle(/** @type {{ toEnd?: boolean }} */ { toEnd = false } = {}) {
   // With nothing remembered (a book just opened), the stop nearest to where foliate left the
   // screen is the one it meant, whatever the line spacing.
   const nearest = stops.reduce((best, st) => (Math.abs(st.at - y) < Math.abs(best.at - y) ? st : best), stops[0]);
-  const stop = atEnd ? rest : remembered == null ? nearest : stops[stopIndex(stops, y)];
+  const lastStop = stops.findLast((/** @type {Stop} */ st) => !st.tail);
+  const pastEnd = remembered != null && !!lastStop && y > lastStop.at + 0.5;
+  const stop = atEnd ? rest : pastEnd ? nearestLine(doc, y) : remembered == null ? nearest : stops[stopIndex(stops, y)];
   if (stop) moveTo(doc, stop, { settling: true });
 }
 
 let settleFrame = 0;
 
-/** Settles on the next frame, once whatever is changing the layout has finished. A chapter
- * change settles by itself when it is done. */
+function nearestLine(/** @type {Document} */ doc, /** @type {number} */ y) {
+  const { lines } = stopsOf(doc);
+  const line = lines.reduce((/** @type {any} */ best, /** @type {any} */ l) => (!best || Math.abs(l.top - y) < Math.abs(best.top - y) ? l : best), undefined);
+  return line ? { at: line.top } : undefined;
+}
+
+function land() {
+  const doc = currentDoc();
+  const el = doc && scrollerOf(doc);
+  if (!doc?.body || !el) return;
+  resting = null;
+  pinnedEnd = null;
+  const y = el.scrollTop;
+  const picture = stopsOf(doc).stops.find((/** @type {Stop} */ st) => st.picture && Math.abs(st.at - y) < 12);
+  const stop = picture ?? nearestLine(doc, y);
+  if (stop) moveTo(doc, stop, { settling: true });
+    else settle();
+}
+
+function hereCfi() {
+  return twoUp() ? (view?.lastLocation?.cfi ?? null) : restingCfi();
+}
+
+function say(/** @type {string} */ message) {
+  notice = message;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => (notice = ''), 2500);
+}
+
+async function followLink(/** @type {string} */ href) {
+  if (!view || changingChapter) return;
+  links?.hide();
+  const from = hereCfi();
+  const held = holdSaves;
+  holdSaves = true;
+  changingChapter = true;
+  let landed = false;
+  try {
+    landed = Boolean(await view.goTo(href));
+    if (landed && !twoUp()) {
+      await whenSized(currentDoc());
+      land();
+    }
+  } finally {
+    changingChapter = false;
+  }
+  if (!landed) {
+    holdSaves = held;
+    say('That link goes nowhere.');
+    return;
+  }
+  if (from) backSpot = from;
+  syncLayout();
+}
+/** With two columns, a note reached by a link shows alone: nothing before it, nothing after it. */
+async function focusNoteAt(/** @type {string} */ href) {
+  const doc = currentDoc();
+  const el = doc && view?.book.resolveHref?.(href)?.anchor?.(doc);
+  if (!el) return;
+  const undo = focusNote(doc, el);
+  if (!undo) return;
+  undoFocus = undo;
+  focusHref = href;
+  view.renderer.render();
+  await view.goTo(href);
+}
+
+/** Brings back the page around a note that was shown alone. */
+async function unfocusNote(/** @type {boolean} */ backToNote = true) {
+  const undo = undoFocus;
+  if (!undo) return false;
+  undoFocus = null;
+  try {
+    undo();
+    view?.renderer.render();
+    if (backToNote && focusHref) await view?.goTo(focusHref);
+  } catch (e) {
+    console.error('Could not bring the page back:', e);
+  }
+  return true;
+}
+
+
+async function goBack() {
+  if (!backSpot || !view || changingChapter) return;
+  const spot = backSpot;
+  backSpot = null;
+  holdSaves = false;
+  changingChapter = true;
+  try {
+    await view.goTo(spot);
+    if (!twoUp()) {
+      await whenSized(currentDoc());
+      land();
+    }
+  } finally {
+    changingChapter = false;
+  }
+  syncLayout();
+}
+
+function askOutside(/** @type {string} */ raw) {
+  links?.hide();
+  /** @type {URL} */
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return;
+  }
+  if (!['http:', 'https:', 'mailto:'].includes(url.protocol)) return;
+  const mail = url.protocol === 'mailto:';
+  outside = { href: url.href, host: mail ? url.pathname : url.host, mail };
+}
+
+function goOutside() {
+  const target = outside;
+  outside = null;
+  if (!target) return;
+  invoke('plugin:opener|open_url', { url: target.href }).catch((e) => {
+    console.error('Could not open the link:', e);
+    say('That link could not be opened.');
+  });
+}
+
+function focusIt(/** @type {HTMLElement} */ node) {
+  node.focus();
+}
+
 function settleSoon() {
   if (settleFrame) return;
   settleFrame = requestAnimationFrame(() => {
@@ -785,6 +948,7 @@ async function changeChapter(/** @type {number} */ dir) {
     const { stops } = stopsOf(leaving);
     exits.set(current, stops.length - 1 - stopIndex(stops, leavingEl.scrollTop));
   }
+  holdSaves = false;
   changingChapter = true;
   resting = null;
   pinnedEnd = null;
@@ -915,6 +1079,25 @@ async function togglePanel() {
 }
 
 function onKey(/** @type {KeyboardEvent} */ e) {
+  // A pinned note stays until it is dismissed. Esc closes it, and nothing moves under it.
+  if (links?.isPinned()) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      links.hide();
+      return;
+    }
+    if (!e.ctrlKey && !e.altKey && !e.metaKey && ['c', ' ', 'ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown'].includes(e.key)) {
+      e.preventDefault();
+      return;
+    }
+  } else links?.hide();
+  if (outside) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      outside = null;
+    }
+    return;
+  }
   if (e.altKey && !e.ctrlKey && e.code === 'KeyS') {
     e.preventDefault();
     togglePanel();
@@ -966,24 +1149,29 @@ function onKey(/** @type {KeyboardEvent} */ e) {
     PageUp: () => stepScreen(-1),
     ArrowDown: () => stepLine(1),
     ArrowUp: () => stepLine(-1),
+    c: () => goBack(),
   };
   const move = moves[e.key];
   if (move) {
     e.preventDefault();
+    if (e.key !== 'c') backSpot = null;
     move();
   }
 }
 
-// A mouse wheel notch is one line. A touchpad's small movements add up, a line's worth of
-// travel at a time.
 const WHEEL_NOTCH = 50; // px: a single event this large is a mouse wheel notch
 const TOUCHPAD_LINE = 30; // px of touchpad travel per line
 let wheelTravel = 0;
-// After a chapter change, a touchpad's leftover momentum is ignored until a quiet moment.
 let wheelLocked = false;
 let lastWheel = 0;
 
 function onWheel(/** @type {WheelEvent} */ e) {
+  // A pinned note stays put, and nothing scrolls under it.
+  if (links?.isPinned()) {
+    e.preventDefault();
+    return;
+  }
+  links?.hide();
   // The picker's list scrolls as usual.
   if (pickerOpen && !e.ctrlKey) return;
   e.preventDefault();
@@ -1039,6 +1227,7 @@ function turnSpread(/** @type {number} */ dir) {
   const r = view?.renderer;
   // At either end of the book, nothing: foliate cannot go on from there.
   if (!r || (dir > 0 ? r.atEnd : r.atStart)) return;
+  holdSaves = false;
   return dir > 0 ? r.next() : r.prev();
 }
 
@@ -1072,7 +1261,22 @@ async function replaceBook(/** @type {{ bookId?: number, path?: string }} */ cho
   await savePosition();
   pickerOpen = false;
   closeView();
-  await openBook();
+  if (!(await openBook())) {
+    // The new book would not open. Go back to the one that was open, and say so in the picker.
+    pickerError = 'That book could not be opened.';
+    try {
+      await invoke('reader_revert');
+    } catch (e) {
+      console.error('Could not go back to the earlier book:', e);
+    }
+    if (!(await openBook())) {
+      showOpenFailure();
+      return;
+    }
+    pickerOpen = true;
+    return;
+
+  }
   readingEl?.focus();
 }
 
@@ -1083,6 +1287,7 @@ async function browseDisk() {
 
 /** Lets go of the book being shown, ready for another. */
 function closeView() {
+  links?.hide();
   view?.close();
   view?.remove();
   view = undefined;
@@ -1092,24 +1297,49 @@ function closeView() {
   percent = null;
   cutoff = 0;
   title = '';
+  bookUuid = '';
+  backSpot = null;
+  holdSaves = false;
+  outside = null;
 }
 
 // ---- Opening
 
+/** What went wrong with the last book that would not open, as one short line. */
+let openFailure = '';
+
+/** A window with no book to show keeps its picker open, with the reason, so there is a way on. */
+function showOpenFailure() {
+  pickerError = `Book could not be opened${openFailure ? ` (${openFailure})` : ''}. Choose another book.`;
+  pickerOpen = true;
+}
+
+/**
+ * Opens the book this window was given and says whether it is showing. A book that will not
+ * open leaves the window empty and the caller to decide what happens next, so the window is
+ * never closed from in here.
+ */
 async function openBook() {
-  /** @type {any} */
-  let book;
-  /** @type {any} */
-  let opened;
   try {
-    opened = await invoke('reader_load');
-    book = await new EPUB(makeLoader(opened.entries)).init();
+    await showBook();
+    return true;
   } catch (e) {
     console.error('Could not open the book:', e);
-    appWindow.destroy();
-    return;
+    openFailure = String(/** @type {any} */ (e)?.message ?? e).split('\n')[0].slice(0, 140);
+    try {
+      closeView();
+    } catch {}
+    return false;
   }
-  title = titleOf(book.metadata) || opened.file_name;
+}
+
+async function showBook() {
+  /** @type {any} */
+  const opened = await invoke('reader_load');
+  /** @type {any} */
+  const book = await new EPUB(makeLoader(opened.entries)).init();
+  title = opened.book_title || titleOf(book.metadata) || opened.file_name;
+  bookUuid = opened.book_uuid ?? '';
   appWindow.setTitle(title).catch(() => {});
   // A library book is known by calibre's own uuid for it. Any other file keeps the old key.
   const legacyKey = keyFor(book, opened.path);
@@ -1125,8 +1355,8 @@ async function openBook() {
   const [saved] = await Promise.all([
     // A place saved under the old key is picked up once, and saved under the new key from then on.
     invoke('reader_position', { key: positionKey })
-      .then((p) => p ?? (positionKey === legacyKey ? null : invoke('reader_position', { key: legacyKey })))
-      .catch(() => null),
+    .then((p) => p ?? (positionKey === legacyKey ? null : invoke('reader_position', { key: legacyKey })))
+    .catch(() => null),
     invoke('reader_settings').then((s) => (settings = /** @type {any} */ (s))).catch(() => {}),
   ]);
   appliedStep = settings.font_step;
@@ -1134,6 +1364,15 @@ async function openBook() {
   exits.clear();
   trails.clear();
   view = document.createElement('foliate-view');
+  view.addEventListener('link', async (/** @type {any} */ e) => {
+    e.preventDefault();
+    if (await links?.pinNote(e.detail.a, e.detail.href)?.catch(() => false)) return;
+    followLink(e.detail.href);
+  });
+  view.addEventListener('external-link', (/** @type {any} */ e) => {
+    e.preventDefault();
+    askOutside(e.detail.href_);
+  });
   view.addEventListener('load', (/** @type {any} */ e) => {
     const doc = e.detail.doc;
     applyFont(doc);
@@ -1145,6 +1384,7 @@ async function openBook() {
     });
     doc.addEventListener('keydown', onKey);
     doc.addEventListener('wheel', onWheel, { passive: false });
+    links?.attach(doc, e.detail.index);
     watchChapter(doc);
     // This chapter's text size is known now, which can change whether two columns fit.
     requestAnimationFrame(syncLayout);
@@ -1160,8 +1400,8 @@ async function openBook() {
       percent = Math.round(fraction * 100);
       lastFraction = fraction;
     }
-    // In one column the reader saves the place itself (see moveTo). With two columns, foliate turns the pages.
-    if (ready && cfi && twoUp()) savePositionSoon(cfi, fraction ?? 0);
+
+    if (ready && cfi && twoUp() && !holdSaves) savePositionSoon(cfi, fraction ?? 0);
   });
   readingEl.append(view);
   await view.open(book);
@@ -1195,10 +1435,20 @@ onMount(() => {
   listen('reader-settings', (/** @type {any} */ e) => {
     if (e.payload.from !== appWindow.label) settings = e.payload.settings;
   }).then((fn) => unlisten.push(fn));
-  // The window closes only once the position is written.
-  appWindow.onCloseRequested(() => savePosition()).then((fn) => unlisten.push(fn));
+  // A title changed in the library shows here at once.
+  listen('book-title-changed', (/** @type {any} */ e) => {
+    if (!bookUuid || e.payload.uuid !== bookUuid || e.payload.title === title) return;
+    title = e.payload.title;
+    appWindow.setTitle(title).catch(() => {});
+  }).then((fn) => unlisten.push(fn));
+  appWindow
+    .onCloseRequested(() => Promise.all([settingsTimer ? flushSettings() : undefined, savePosition()]).then(() => {}))
+    .then((fn) => unlisten.push(fn));
 
-  openBook();
+  // A window opened for one book that cannot show it has nothing else to show.
+  openBook().then((ok) => {
+    if (!ok) showOpenFailure();
+  });
   return () => {
     window.removeEventListener('keydown', onKey);
     window.removeEventListener('wheel', onWheel);
@@ -1236,11 +1486,29 @@ onMount(() => {
     {#if percent != null}
       <div class="percent" style:left="{inset.left}px" style:height="{inset.bottom}px">{percent}%</div>
     {/if}
+    {#if backSpot}
+      <button class="back-chip" onclick={goBack}>Back</button>
+    {/if}
+    {#if notice}
+      <div class="notice">{notice}</div>
+    {/if}
+    <LinkPreview bind:this={links} getBook={() => view?.book} onJump={(href) => followLink(href)} />
+    {#if outside}
+      <div class="ask" role="dialog" aria-label="Open link">
+        <div class="ask-box">
+          <p>{outside.mail ? 'This will open your email app to write to' : 'This will open'} <b>{outside.host}</b>{outside.mail ? '.' : ' in your browser.'}</p>
+          <div class="ask-actions">
+            <button onclick={() => (outside = null)}>Cancel</button>
+            <button class="go" use:focusIt onclick={goOutside}>Go ahead</button>
+          </div>
+        </div>
+      </div>
+    {/if}
   </div>
   <!-- Opens and closes by growing and shrinking, the same glide as the edit dialog's side panels. -->
   <div class="panel-slot" style:height="{panelOpen ? panelHeight : 0}px" inert={!panelOpen}>
     <div bind:clientHeight={panelHeight}>
-      <ReaderSettings open={panelOpen} padding={settings.padding} twoColumns={settings.two_columns} onLayout={setLayout} onChange={(/** @type {any} */ padding) => saveSettings({ ...settings, padding })} />
+      <ReaderSettings open={panelOpen} padding={settings.padding} twoColumns={settings.two_columns} onLayout={setLayout} onChange={(/** @type {any} */ padding) => saveSettings({ ...settings, padding }, 300)} />
     </div>
   </div>
 </div>
@@ -1286,4 +1554,33 @@ area reaches past the edges by the difference (see applyLayout). */
   color: var(--zen-text-faint);
   user-select: none; pointer-events: none;
 }
+.back-chip {
+  position: absolute; top: 8px; left: 14px; z-index: 2;
+  font: 12px var(--zen-font-sans); color: var(--zen-panel);
+  background: var(--zen-ink); border: 1px solid var(--zen-border); border-radius: 999px;
+  padding: 3px 12px; cursor: pointer;
+}
+.back-chip:hover { color: var(--zen-ink); border-color: var(--zen-text-faint); }
+.notice {
+  position: absolute; z-index: 3; left: 50%; bottom: 36px; transform: translateX(-50%);
+  font: 13px var(--zen-font-sans); color: var(--zen-text-secondary);
+  background: var(--zen-panel); border: 1px solid var(--zen-border); border-radius: 6px;
+  padding: 6px 14px; pointer-events: none;
+}
+.ask {
+  position: absolute; inset: 0; z-index: 4; display: grid; place-items: center;
+  background: color-mix(in srgb, var(--zen-ink) 18%, transparent);
+}
+.ask-box {
+  max-width: 320px; box-sizing: border-box;
+  background: var(--zen-panel); border: 1px solid var(--zen-border); border-radius: 6px;
+  padding: 16px 18px; font: 14px/1.45 var(--zen-font-sans); color: var(--zen-ink);
+}
+.ask-box p { margin: 0; overflow-wrap: anywhere; }
+.ask-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.ask-actions button {
+  font: inherit; padding: 5px 12px; border-radius: 4px; cursor: pointer;
+  color: var(--zen-text-secondary); background: transparent; border: 1px solid var(--zen-border);
+}
+.ask-actions .go { color: #fff; background: var(--zen-red); border-color: var(--zen-red); }
 </style>

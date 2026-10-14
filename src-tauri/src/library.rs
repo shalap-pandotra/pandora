@@ -23,6 +23,7 @@ pub struct FilterRow {
     pub id: i64,
     pub name: String,
     pub count: i64,
+    pub sort: String,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -102,7 +103,7 @@ ORDER BY cc.value ASC"
 
 pub fn list_authors(conn: &Connection) -> rusqlite::Result<Vec<FilterRow>> {
     let mut stmt = conn.prepare(
-        "SELECT a.id, a.name, COUNT(bal.book) as cnt
+        "SELECT a.id, a.name, COUNT(bal.book) as cnt, COALESCE(a.sort, a.name)
 FROM authors a
 JOIN books_authors_link bal ON bal.author = a.id
 GROUP BY a.id
@@ -111,20 +112,20 @@ ORDER BY cnt DESC, a.name ASC"
 
     let rows = stmt.query_map([], |row| {
         let name: String = row.get(1)?;
-        Ok(FilterRow { id: row.get(0)?, name: restore_author_name(&name), count: row.get(2)? })
+        Ok(FilterRow { id: row.get(0)?, name: restore_author_name(&name), count: row.get(2)?, sort: row.get(3)? })
     })?;
     rows.collect()
 }
 pub fn list_series(conn: &Connection) -> rusqlite::Result<Vec<FilterRow>> {
     let mut stmt = conn.prepare(
-        "SELECT s.id, s.name, COUNT(bsl.book) as cnt
+        "SELECT s.id, s.name, COUNT(bsl.book) as cnt, COALESCE(s.sort, s.name)
 FROM series s
 JOIN books_series_link bsl ON bsl.series = s.id
 GROUP BY s.id
 ORDER BY cnt DESC, s.name ASC"
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok(FilterRow { id: row.get(0)?, name: row.get(1)?, count: row.get(2)? })
+        Ok(FilterRow { id: row.get(0)?, name: row.get(1)?, count: row.get(2)?, sort: row.get(3)? })
     })?;
     rows.collect()
 }
@@ -138,7 +139,8 @@ GROUP BY t.id
 ORDER BY cnt DESC, t.name ASC"
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok(FilterRow { id: row.get(0)?, name: row.get(1)?, count: row.get(2)? })
+        let name: String = row.get(1)?;
+        Ok(FilterRow { id: row.get(0)?, sort: name.clone(), name, count: row.get(2)? })
     })?;
     rows.collect()
 }
@@ -398,6 +400,18 @@ pub fn book_uuid(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<Str
     conn.query_row("SELECT uuid FROM books WHERE id = ?1", [book_id], |row| row.get::<_, Option<String>>(0))
         .optional()
         .map(|found| found.flatten().filter(|u| !u.trim().is_empty()))
+}
+
+pub fn book_title_by_uuid(conn: &Connection, uuid: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT title FROM books WHERE uuid = ?1", [uuid], |row| row.get::<_, String>(0)).optional()
+}
+
+pub fn book_uuid_and_title(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<(String, String)>> {
+    conn.query_row("SELECT uuid, title FROM books WHERE id = ?1", [book_id], |row| {
+        Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+    })
+    .optional()
+    .map(|found| found.and_then(|(uuid, title)| uuid.filter(|u| !u.trim().is_empty()).map(|u| (u, title))))
 }
 
 pub fn open_library(library_path: &str) -> rusqlite::Result<Connection> {

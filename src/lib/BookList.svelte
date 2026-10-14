@@ -1,5 +1,6 @@
 <script>
 import { convertFileSrc } from '@tauri-apps/api/core';
+import VirtualGrid from './VirtualGrid.svelte';
 
 let { books = [], value = $bindable(''), onSearch, onSelectBook, height = 224 } = $props();
 
@@ -24,8 +25,8 @@ function handleInput() {
     />
   </div>
 
-  <div class="grid">
-    {#each books as book (book.id)}
+  <VirtualGrid items={books} itemWidth={78} itemHeight={131} gap={16}>
+    {#snippet cell(book)}
       <button type="button" class="zen-btn zen-card card" onclick={() => onSelectBook?.(book)}>
         {#if book.cover_path}
           <img class="cover" src={convertFileSrc(book.cover_path) + '?v=' + book.cover_version} alt={book.title} loading="lazy" />
@@ -34,8 +35,8 @@ function handleInput() {
         {/if}
         <div class="title">{book.title}</div>
       </button>
-    {/each}
-  </div>
+    {/snippet}
+  </VirtualGrid>
 </div>
 
 <style>
@@ -70,15 +71,15 @@ function handleInput() {
   position: absolute; width: 1px; height: 1px;
   overflow: hidden; clip: rect(0 0 0 0);
 }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, 78px); gap: 16px; }
 .card { display: flex; flex-direction: column; gap: 6px; border-radius: 8px; padding: 6px; }
 .cover { width: 100%; aspect-ratio: 2/3; border-radius: 2px; box-shadow: 0 3px 8px rgba(27,28,30,0.12); object-fit: cover; }
 .cover.fallback { 
   background: var(--zen-red-dark);
 }
 .title {
-  font-size: 11px; color: var(--zen-text-muted);
+  font-size: 11px; line-height: 14px; color: var(--zen-text-muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  overscroll-behavior: auto; /* a box that only clips must not swallow the mouse wheel */
 }
 .card {
   display: flex;
@@ -87,6 +88,8 @@ function handleInput() {
   border-radius: 8px;
   padding: 6px;
   width: 100%;
+  height: 100%;
+  box-sizing: border-box;
   text-align: left;
   cursor: pointer;
 }
