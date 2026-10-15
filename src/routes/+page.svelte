@@ -27,6 +27,32 @@ let searchTerm = $state('');
 let currentFilter = $state({ author_id: null, series_id: null, tag_id: null, search: null, custom_column_id: null, custom_value_id: null });
 
 let gridHeight = $state(224);
+
+const PREVIEW_HEIGHT_KEY = 'pandora.previewHeight';
+const RESIZER_HEIGHT = 6;
+let sizeRestored = false;
+let searchReturnTo = null; 
+let previewWanted = null;
+function applyPreviewWanted() {
+  if (previewWanted === null || !mainColEl) return;
+  const main = mainColEl.getBoundingClientRect().height;
+  gridHeight = Math.min(main - 296, Math.max(120, main - previewWanted - RESIZER_HEIGHT));
+}
+function savePreviewHeight() {
+  if (!mainColEl) return;
+  previewWanted = Math.round(mainColEl.getBoundingClientRect().height - gridHeight - RESIZER_HEIGHT);
+  try {
+    localStorage.setItem(PREVIEW_HEIGHT_KEY, String(previewWanted));
+  } catch {}
+}
+function restorePreviewHeight() {
+  try {
+    const saved = Number(localStorage.getItem(PREVIEW_HEIGHT_KEY));
+    if (!Number.isFinite(saved) || saved <= 0) return;
+    previewWanted = saved;
+    applyPreviewWanted();
+  } catch {}
+}
 let dragging = false;
 let mainColEl = $state();
 /** @type {any} */
@@ -126,11 +152,23 @@ onMount(() => {
       e.preventDefault();
       previewPanel?.openBook();
     }
+    if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !typing && editIndex < 0) {
+      e.preventDefault();
+      const search = document.getElementById('lib-search');
+      const active = document.activeElement;
+      searchReturnTo = active instanceof HTMLElement && active !== document.body ? active : null;
+      search?.addEventListener('blur', () => (searchReturnTo = null), { once: true });
+      search?.focus();
+      search?.select();
+    } else if (e.key === 'Escape' && e.target instanceof HTMLElement && e.target.id === 'lib-search') {
+      e.preventDefault();
+      const back = searchReturnTo;
+      e.target.blur();
+      if (back?.isConnected) back.focus();
+    }
   }
   window.addEventListener('keydown', handleKeydown);
 
-  // Closing the window (Alt+F4 or the close button) while an editing session is open goes
-  // through the dialog, which asks first if anything would be lost.
   let unlistenClose;
   getCurrentWindow()
     .onCloseRequested((event) => {
@@ -160,14 +198,20 @@ onMount(() => {
 $effect(() => {
   if (!mainColEl) return;
 
+  if (!sizeRestored) {
+    sizeRestored = true;
+    restorePreviewHeight();
+  }
+
   const resizeObserver = new ResizeObserver(() => {
     const rect = mainColEl.getBoundingClientRect();
     const gridMin = 120;
-    const previewMin = 280;
+    const previewMin = 296;
     const max = rect.height - previewMin;
     if (gridHeight > max) {
       gridHeight = Math.max(gridMin, max);
     }
+    applyPreviewWanted();
   });
   resizeObserver.observe(mainColEl);
 
@@ -280,6 +324,7 @@ function handleSelectBook(book) {
 
 function startDrag(e) {
   dragging = true;
+  pendingHeight = null;
   e.target.setPointerCapture(e.pointerId);
   document.body.style.cursor = 'row-resize';
   document.body.style.userSelect = 'none';
@@ -299,7 +344,7 @@ function onDrag(e) {
   if (!dragging || !cachedRect) return;
   const fromBottom = cachedRect.bottom - e.clientY + dragOffset;
   const gridMin = 120;
-  const previewMin = 280;
+  const previewMin = 296;
   const max = cachedRect.height - previewMin;
   pendingHeight = Math.min(max, Math.max(gridMin, fromBottom));
 
@@ -314,6 +359,8 @@ function onDrag(e) {
 
 function stopDrag() {
   dragging = false;
+  if (pendingHeight !== null) gridHeight = pendingHeight;
+  savePreviewHeight();
   cachedRect = null;
   dragOffset = 0;
   document.body.style.cursor = '';
@@ -325,7 +372,8 @@ function stopDrag() {
 function handleResizerKeydown(e) {
   const step = 20;
   if (e.key === 'ArrowDown') { gridHeight = Math.max(120, gridHeight - step); }
-  if (e.key === 'ArrowUp') { gridHeight = Math.min(mainColEl.getBoundingClientRect().height - 280, gridHeight + step); }
+  if (e.key === 'ArrowUp') { gridHeight = Math.min(mainColEl.getBoundingClientRect().height - 296, gridHeight + step); }
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') savePreviewHeight();
 }
 
 async function pickLibraryFolder() {
@@ -375,9 +423,9 @@ async function openLibrary() {
   {/key}
 {/if}
 <div class="frame" inert={editingBook != null}>
-  <TopBar />
+  <TopBar bind:searchValue={searchTerm} onSearch={handleSearch} />
   <div class="body-row">
-    <Sidebar onFilterChange={handleFilterChange} onReset={handleReset} libraryLoaded={libraryLoaded} onEditMetadata={openEditor} refreshKey={sidebarVersion} libraryKey={libraryPath} />
+    <Sidebar onFilterChange={handleFilterChange} onReset={handleReset} libraryLoaded={libraryLoaded} refreshKey={sidebarVersion} libraryKey={libraryPath} />
     <div class="main-col" bind:this={mainColEl}>
       <PreviewPanel bind:this={previewPanel} book={selectedBook} libraryLoaded={libraryLoaded} onEdit={openEditor} />
       <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -389,12 +437,12 @@ async function openLibrary() {
         aria-label="Resize book grid"
         aria-valuenow={gridHeight}
         aria-valuemin={120}
-        aria-valuemax={mainColEl ? mainColEl.getBoundingClientRect().height - 280 : 999}
+        aria-valuemax={mainColEl ? mainColEl.getBoundingClientRect().height - 296 : 999}
         tabindex="0"
         onpointerdown={startDrag}
         onkeydown={handleResizerKeydown}
       ></div>
-      <BookList {books} bind:value={searchTerm} onSearch={handleSearch} onSelectBook={handleSelectBook} height={gridHeight} />
+      <BookList {books} onSelectBook={handleSelectBook} onEdit={openEditor} height={gridHeight} />
     </div>
   </div>
   <StatusBar libraryName={libraryPath.split(/[\\/]/).pop()} bookCount={books.length} />
@@ -411,6 +459,8 @@ async function openLibrary() {
 .resizer {
   height: 6px;
   flex: none;
+  box-sizing: border-box;
+  border-left: 1px solid var(--zen-border);
   cursor: row-resize;
   background: transparent;
 }

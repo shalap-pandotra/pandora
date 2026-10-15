@@ -3,13 +3,21 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 
 // Without a title this is the library's bar. A reader window passes the book's title,
 // shown in place of the name, with the same slim bar and window controls.
-let { title = null } = $props();
+let { title = null, searchValue = $bindable(''), onSearch } = $props();
 
 const appWindow = getCurrentWindow();
 
 function minimize() { appWindow.minimize(); }
 function toggleMaximize() { appWindow.toggleMaximize(); }
 function close() { appWindow.close(); }
+
+// The library's bar holds the search box. The term goes out after a short pause, so typing
+// does not start a new search on every key.
+let debounceHandle;
+function handleInput() {
+  clearTimeout(debounceHandle);
+  debounceHandle = setTimeout(() => onSearch?.(searchValue), 250);
+}
 </script>
 
 <div class="topbar" class:reader={title != null}>
@@ -17,6 +25,15 @@ function close() { appWindow.close(); }
     <div class="book-title" data-tauri-drag-region><span data-tauri-drag-region>{title}</span></div>
   {:else}
     <div id="brand-name" class="brand" data-tauri-drag-region>Pandora</div>
+  {/if}
+  {#if title == null && onSearch}
+    <div class="search">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--zen-text-faint)" stroke-width="2" aria-hidden="true">
+        <circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+      </svg>
+      <label for="lib-search" class="sr-only">Search library</label>
+      <input id="lib-search" bind:value={searchValue} oninput={handleInput} placeholder="Search title, author, tag…" />
+    </div>
   {/if}
   <div class="topbar-right" data-tauri-drag-region>
     <div role="group" aria-label="Window controls" class="winctrls">
@@ -48,6 +65,7 @@ function close() { appWindow.close(); }
   transform: scaleY(2.23);
 }
 .topbar {
+  position: relative;
   height: 32px; flex: none; display: flex; background: var(--zen-bg);
   cursor: default;
   user-select: none;
@@ -69,6 +87,22 @@ function close() { appWindow.close(); }
 }
 .topbar-right { flex: 1; display: flex; align-items: center; justify-content: flex-end; gap: 20px; padding: 0 20px; }
 .reader .topbar-right { flex: none; padding: 0 6px; }
+.search {
+  position: absolute; left: 50%; top: 4px; z-index: 2; transform: translateX(-50%);
+  width: 360px; max-width: calc(100% - 440px); box-sizing: border-box; height: 24px;
+  display: flex; align-items: center;
+  background: var(--zen-panel); border: 1px solid var(--zen-border); border-radius: 2px;
+  padding: 0 10px;
+}
+.search svg { flex: none; margin-right: 8px; }
+.search input {
+  border: none; background: none; outline: none; user-select: text;
+  font-size: 13px; width: 100%; color: var(--zen-ink);
+}
+.sr-only {
+  position: absolute; width: 1px; height: 1px;
+  overflow: hidden; clip: rect(0 0 0 0);
+}
 .winctrls { display: flex; background: var(--zen-panel); border: 1px solid var(--zen-border); border-radius: 2px; overflow: hidden; }
 
 .winctrls button { position: relative; width: 28px; height: 22px; display: flex; align-items: center; justify-content: center; color: var(--zen-text-secondary); }

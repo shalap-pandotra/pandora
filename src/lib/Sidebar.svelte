@@ -4,7 +4,7 @@ import { onMount, untrack } from 'svelte';
 import GroupedList from './GroupedList.svelte';
 import { letterGroups } from './letterGroups.js';
 
-let { onFilterChange, onReset, libraryLoaded, onEditMetadata, refreshKey, libraryKey } = $props();
+let { onFilterChange, onReset, libraryLoaded, refreshKey, libraryKey } = $props();
 let authors = $state([]);
 let series = $state([]);
 let tags = $state([]);
@@ -186,34 +186,9 @@ function toggleColumn(colId) {
   expandedColumns = next;
 }
 
-const tools = [
-  { label: 'Add books', path: 'M12 5v14M5 12h14' },
-  { label: 'Remove books', path: 'M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14' },
-  { label: 'Edit metadata', path: 'M4 4h10l6 6v10a1 1 0 01-1 1H4a1 1 0 01-1-1V5a1 1 0 011-1z', run: () => onEditMetadata?.() },
-  { label: 'Convert books', path: 'M17 3l4 4-11 11H6v-4z' },
-  { label: 'Save to disk', path: 'M4 19V6a2 2 0 012-2h8l6 6v9a2 2 0 01-2 2H6a2 2 0 01-2-2z' },
-  { label: 'Connect / share', path: 'M3 9h18M8 4v5', rect: true }
-];
 </script>
 
 <div class="sidebar">
-
-  <div>
-    <div class="eyebrow">Tools</div>
-    <div class="stack">
-      {#each tools as tool}
-        <button class="zen-btn tool-btn" onclick={tool.run}>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--zen-text-secondary)" stroke-width="2">
-            {#if tool.rect}<rect x="3" y="4" width="18" height="16" rx="2" />{/if}
-            <path d={tool.path} />
-          </svg>
-          <span>{tool.label}</span>
-        </button>
-      {/each}
-    </div>
-  </div>
-
-  <div class="divider"></div>
 
   <div>
     <div class="filter-head">
@@ -221,6 +196,8 @@ const tools = [
       <button class="zen-btn reset-link" onclick={reset}>Reset</button>
     </div>
   </div>
+
+  <div class="divider"></div>
 
   <div>
     <button class="zen-btn section-header" onclick={() => authorsExpanded = !authorsExpanded}>
@@ -236,6 +213,8 @@ const tools = [
     {/if}
   </div>
 
+  <div class="divider"></div>
+
   <div>
     <button class="zen-btn section-header" onclick={() => seriesExpanded = !seriesExpanded}>
       <span class="section-title" style="margin:0;">Series</span>
@@ -249,6 +228,8 @@ const tools = [
       </div>
     {/if}
   </div>
+
+  <div class="divider"></div>
 
   <div>
     <button class="zen-btn section-header" onclick={() => tagsExpanded = !tagsExpanded}>
@@ -296,6 +277,7 @@ const tools = [
   </div>
 
   {#each columnTrees as col (col.id)}
+    <div class="divider"></div>
     <div>
       <button class="zen-btn section-header" onclick={() => toggleColumn(col.id)}>
         <span class="section-title" style="margin:0;">{col.name}</span>
@@ -367,7 +349,7 @@ const tools = [
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
 }
 .stack { display: flex; flex-direction: column; gap: 2px; }
 .eyebrow {
@@ -377,16 +359,6 @@ const tools = [
   text-transform: uppercase;
   color: var(--zen-text-faint);
   margin-bottom: 8px;
-}
-.tool-btn {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 8px;
-  border-radius: 6px;
-  font-size: 13px;
-  text-align: left;
-  width: 100%;
 }
 .section-header {
   display: flex;
@@ -400,8 +372,8 @@ const tools = [
   color: var(--zen-text-faint);
 }
 .divider {
-  height: 1px;
-  background: var(--zen-border);
+  height: 0;
+  border-top: 1px solid var(--zen-border);
   margin: 0;
   flex-shrink: 0;
 }

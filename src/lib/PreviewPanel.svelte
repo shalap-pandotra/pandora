@@ -44,6 +44,7 @@ let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null)
 
     <div class="meta">
       <div class="meta-scroll">
+        <div class="meta-head">
         <div>
           <h1>{book.title}</h1>
           {#if book.series}
@@ -71,6 +72,7 @@ let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null)
             {/each}
           </div>
         {/if}
+        </div>
 
         {#if sanitizedComments}
           <div class="description">{@html sanitizedComments}</div>
@@ -110,9 +112,10 @@ let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null)
 .preview {
   flex: 1 1 auto; min-height: 0;
   border: 1px solid var(--zen-border); 
-  border-radius: 2px 0 0 2px;
+  border-radius: 2px 0 0 0;
   background: var(--zen-panel);
   display: flex; gap: 32px; padding: 32px; overflow: hidden;
+  container: preview / size;
 }
 .empty {
   margin: auto; color: var(--zen-text-faint); font-size: 14px;
@@ -159,6 +162,7 @@ let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null)
   padding-top: 16px;
 }
 .meta h1 { font-family: var(--zen-font-serif); font-size: 32px; font-weight: 400; transform: scaleY(1.15); color: var(--zen-ink); line-height: 1.15; margin: 0; }
+.meta-head { display: flex; flex-direction: column; gap: 16px; }
 .stars { display: flex; gap: 3px; }
 .series { font-size: 15px; color: var(--zen-text-muted); margin-top: 6px; }
 .author { font-size: 15px; color: var(--zen-text-secondary); }
@@ -166,4 +170,16 @@ let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null)
 .pill { padding: 4px 12px; border-radius: 999px; font-size: 12px; background: var(--zen-pill-bg); color: var(--zen-text-secondary); }
 .btn-primary { height: 38px; padding: 0 18px; border-radius: 2px; background: var(--zen-red); color: white; font-size: 13px; font-weight: 500; }
 .btn-secondary { height: 38px; padding: 0 18px; border-radius: 2px; background: none; border: 1px solid var(--zen-ink); color: var(--zen-ink); font-size: 13px; font-weight: 500; }
+@container preview (max-height: 335px) and (min-width: 800px) {
+  .meta {
+    display: grid;
+    grid-template-columns: minmax(260px, 40%) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+    column-gap: 32px;
+  }
+  .meta-scroll { display: contents; }
+  .meta-head { grid-column: 1; grid-row: 1; min-height: 0; overflow-y: auto; }
+  .description { grid-column: 2; grid-row: 1 / span 2; min-height: 0; overflow-y: auto; }
+  .meta-actions { grid-column: 1; grid-row: 2; }
+}
 </style>
