@@ -82,6 +82,7 @@ onMount(() => {
       <input
         class="zen-input search"
         type="text"
+        autocomplete="off"
         placeholder="Search the library"
         spellcheck="false"
         bind:this={searchEl}

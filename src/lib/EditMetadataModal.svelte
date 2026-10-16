@@ -2,8 +2,9 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { tick } from 'svelte';
 import { open } from '@tauri-apps/plugin-dialog';
+import Combobox from './Combobox.svelte';
 
-let { book, draft, ui, startError, position, stagedElsewhere, onNavigate, onSave, onClose, quitRequest, onQuit } = $props();
+let { book, draft, ui, startError, names = { authors: [], tags: [] }, position, stagedElsewhere, onNavigate, onSave, onClose, quitRequest, onQuit } = $props();
 
 let comments = $state('');
 let originalComments = '';
@@ -396,7 +397,7 @@ function pendingCount() {
 
 function requestClose() {
   if (pendingCount() === 0) onClose();
-  else confirmOpen = true;
+    else confirmOpen = true;
 }
 
 // The window itself is being closed. Never stop in the middle of a save.
@@ -472,16 +473,13 @@ function handleKey(e) {
         <h2 id="edit-title">Edit metadata</h2>
         <div class="grid">
           <label for="em-title">Title</label>
-          <input id="em-title" bind:value={titleText} disabled={!loaded} />
+          <input id="em-title" autocomplete="off" bind:value={titleText} disabled={!loaded} />
           <label for="em-authors">Author(s)</label>
-          <input id="em-authors" bind:value={authorsText} disabled={!loaded} placeholder="Separate authors with &amp;" />
+          <Combobox id="em-authors" class="wide" separator="&" options={names.authors} bind:value={authorsText} disabled={!loaded} placeholder="Separate authors with &amp;" />
           <label for="em-series">Series</label>
           <div class="row">
-            <input id="em-series" list="em-series-list" bind:value={seriesText} onchange={seriesChosen} disabled={!loaded} placeholder="No series" />
-            <datalist id="em-series-list">
-              {#each seriesNames as name}<option value={name}></option>{/each}
-            </datalist>
-            <input class="num" type="number" step="any" aria-label="Series number" bind:value={seriesIndex} disabled={!loaded || seriesText.trim() === ''} />
+            <Combobox id="em-series" options={seriesNames} bind:value={seriesText} onchange={seriesChosen} onpick={seriesChosen} disabled={!loaded} placeholder="No series" />
+            <input class="num" type="number" step="any" autocomplete="off" aria-label="Series number" bind:value={seriesIndex} disabled={!loaded || seriesText.trim() === ''} />
           </div>
           <span class="field-label">Rating</span>
           <div class="rating-row">
@@ -505,10 +503,10 @@ function handleKey(e) {
           </div>
 
           <label for="em-tags">Tags</label>
-          <input id="em-tags" bind:value={tagsText} disabled={!loaded} placeholder="Separate tags with commas" />
+          <Combobox id="em-tags" class="wide" separator="," options={names.tags} bind:value={tagsText} disabled={!loaded} placeholder="Separate tags with commas" />
 
           <label for="em-ids">Ids</label>
-          <input id="em-ids" bind:value={idsText} disabled={!loaded} placeholder="isbn:9781101489147, doi:10.1000/182" />
+          <input id="em-ids" autocomplete="off" bind:value={idsText} disabled={!loaded} placeholder="isbn:9781101489147, doi:10.1000/182" />
 
           <label for="em-date">Date</label>
           <div class="row">
@@ -523,20 +521,14 @@ function handleKey(e) {
           </div>
 
           <label for="em-publisher">Publisher</label>
-          <input id="em-publisher" list="em-publisher-list" bind:value={publisherText} disabled={!loaded} placeholder="No publisher" />
-          <datalist id="em-publisher-list">
-            {#each publisherNames as name}<option value={name}></option>{/each}
-          </datalist>
+          <Combobox id="em-publisher" options={publisherNames} bind:value={publisherText} disabled={!loaded} placeholder="No publisher" />
 
           <label for="em-lang">Languages</label>
           <div class="lang-box">
             {#each langCodes as code (code)}
               <span class="lang-chip">{langName(code)}<button type="button" class="zen-btn lang-x" aria-label="Remove {langName(code)}" onclick={() => removeLanguage(code)}>×</button></span>
             {/each}
-            <input id="em-lang" list="em-lang-list" bind:value={langInput} disabled={!loaded} placeholder="Add a language" onchange={() => addLanguage(false)} onkeydown={langKey} />
-            <datalist id="em-lang-list">
-            {#each langOptions as o}<option value={o.name}></option>{/each}
-          </datalist>
+            <Combobox id="em-lang" options={langOptions.map((o) => o.name)} bind:value={langInput} disabled={!loaded} placeholder="Add a language" onchange={() => addLanguage(false)} onpick={() => addLanguage(false)} onkeydown={langKey} />
           </div>
         </div>
 
@@ -729,10 +721,12 @@ h2 { margin: 0; font-family: var(--zen-font-serif); font-size: 22px; font-weight
   gap: 8px 12px;
   align-items: center;
 }
-.grid > input:not(#em-publisher) { grid-column: 2 / -1; }
+.grid > input,
+.grid > :global(.cb-box.wide) { grid-column: 2 / -1; }
 @container (max-width: 560px) {
   .grid { grid-template-columns: 90px minmax(0, 1fr); }
-  .grid > input:not(#em-publisher) { grid-column: auto; }
+  .grid > input,
+  .grid > :global(.cb-box.wide) { grid-column: auto; }
 }
 label, .field-label { font-size: 12px; font-weight: 600; color: var(--zen-text-secondary); }
 input, textarea {
@@ -749,6 +743,7 @@ input, textarea {
 input:disabled, textarea:disabled { background: var(--zen-bg); color: var(--zen-text-faint); }
 textarea { font-family: monospace; resize: vertical; min-height: 100px; }
 .row { display: flex; gap: 8px; }
+.row > :global(.cb-box) { flex: 1 1 0; }
 .num { width: 80px; flex: none; }
 .cc-panel {
   flex: none;
@@ -866,17 +861,18 @@ textarea { font-family: monospace; resize: vertical; min-height: 100px; }
 }
 .side-tab:focus-visible { outline: 2px solid var(--zen-red); outline-offset: 2px; }
 .lang-box { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.lang-box input { width: auto; flex: 1 1 140px; }
+.lang-box :global(.cb-box) { flex: 1 1 140px; min-width: auto; }
+.lang-box :global(.cb-input) { width: auto; min-width: 100%; }
 .lang-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  padding: 3px 4px 3px 9px;
-  border: 1px solid var(--zen-border);
-  border-radius: 2px;
-  background: var(--zen-bg);
-  color: var(--zen-text-secondary);
+display: inline-flex;
+align-items: center;
+gap: 4px;
+font-size: 12px;
+padding: 3px 4px 3px 9px;
+border: 1px solid var(--zen-border);
+border-radius: 2px;
+background: var(--zen-bg);
+color: var(--zen-text-secondary);
 }
 .lang-x { font-size: 14px; line-height: 1; padding: 0 5px; color: var(--zen-text-faint); }
 .lang-x:hover { color: var(--zen-red); }
@@ -892,31 +888,31 @@ textarea { font-family: monospace; resize: vertical; min-height: 100px; }
 .nav { display: flex; align-items: center; gap: 8px; }
 .nav-btn { height: 36px; padding: 0 12px; font-size: 13px; }
 .confirm-scrim {
-  position: absolute;
-  inset: 0;
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(28, 27, 24, 0.35);
+position: absolute;
+inset: 0;
+z-index: 20;
+display: flex;
+align-items: center;
+justify-content: center;
+background: rgba(28, 27, 24, 0.35);
 }
 .confirm {
-  max-width: 360px;
-  padding: 20px 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  background: var(--zen-panel);
-  border: 1px solid var(--zen-border);
-  border-radius: 2px;
+max-width: 360px;
+padding: 20px 24px;
+display: flex;
+flex-direction: column;
+gap: 14px;
+background: var(--zen-panel);
+border: 1px solid var(--zen-border);
+border-radius: 2px;
 }
 .confirm p { margin: 0; font-size: 14px; color: var(--zen-ink); }
 .btn-primary, .btn-secondary {
-  height: 36px;
-  padding: 0 18px;
-  border-radius: 2px;
-  font-size: 13px;
-  font-weight: 500;
+height: 36px;
+padding: 0 18px;
+border-radius: 2px;
+font-size: 13px;
+font-weight: 500;
 }
 .btn-primary { background: var(--zen-red); color: white; }
 .btn-secondary { background: var(--zen-panel); border: 1px solid var(--zen-border); color: var(--zen-ink); }

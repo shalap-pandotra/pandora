@@ -56,6 +56,7 @@ $effect(() => {
           class:invalid={!valid(drafts[key] ?? '')}
           type="text"
           inputmode="numeric"
+          autocomplete="off"
           spellcheck="false"
           bind:this={inputs[key]}
           bind:value={drafts[key]}

@@ -1,9 +1,10 @@
 <script>
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import Combobox from './Combobox.svelte';
 
 // Without a title this is the library's bar. A reader window passes the book's title,
 // shown in place of the name, with the same slim bar and window controls.
-let { title = null, searchValue = $bindable(''), onSearch } = $props();
+let { title = null, searchValue = $bindable(''), onSearch, suggest = () => [], onSearchFocus } = $props();
 
 const appWindow = getCurrentWindow();
 
@@ -17,6 +18,12 @@ let debounceHandle;
 function handleInput() {
   clearTimeout(debounceHandle);
   debounceHandle = setTimeout(() => onSearch?.(searchValue), 250);
+}
+
+// Enter, or picking a suggestion, searches at once instead of waiting for the pause.
+function searchNow() {
+  clearTimeout(debounceHandle);
+  onSearch?.(searchValue);
 }
 </script>
 
@@ -32,7 +39,7 @@ function handleInput() {
         <circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
       </svg>
       <label for="lib-search" class="sr-only">Search library</label>
-      <input id="lib-search" bind:value={searchValue} oninput={handleInput} placeholder="Search title, author, tag…" />
+      <Combobox id="lib-search" bare bind:value={searchValue} source={suggest} minLength={2} oninput={handleInput} onfocus={onSearchFocus} onpick={searchNow} onenter={searchNow} placeholder="Search title, author, tag…" />
     </div>
   {/if}
   <div class="topbar-right" data-tauri-drag-region>
@@ -88,17 +95,14 @@ function handleInput() {
 .topbar-right { flex: 1; display: flex; align-items: center; justify-content: flex-end; gap: 20px; padding: 0 20px; }
 .reader .topbar-right { flex: none; padding: 0 6px; }
 .search {
-  position: absolute; left: 50%; top: 4px; z-index: 2; transform: translateX(-50%);
+  position: absolute; left: 50%; top: 4px; z-index: 20; transform: translateX(-50%);
   width: 360px; max-width: calc(100% - 440px); box-sizing: border-box; height: 24px;
   display: flex; align-items: center;
   background: var(--zen-panel); border: 1px solid var(--zen-border); border-radius: 2px;
   padding: 0 10px;
 }
 .search svg { flex: none; margin-right: 8px; }
-.search input {
-  border: none; background: none; outline: none; user-select: text;
-  font-size: 13px; width: 100%; color: var(--zen-ink);
-}
+.search :global(.cb-box) { position: static; flex: 1; }
 .sr-only {
   position: absolute; width: 1px; height: 1px;
   overflow: hidden; clip: rect(0 0 0 0);
@@ -111,7 +115,7 @@ function handleInput() {
 .winctrls button:hover { background: var(--zen-pill-bg); }
 .winctrls button.close:hover { background: var(--zen-red); color: #FFFFFF; }
 /* The dividers are elements of their own between the buttons, so a hovered button's
-   colour never reaches them. */
+colour never reaches them. */
 .sep {
   flex: none; width: 1px; align-self: stretch;
   display: flex; align-items: center;

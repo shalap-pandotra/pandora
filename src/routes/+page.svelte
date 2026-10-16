@@ -22,6 +22,7 @@ let restoreOpen = $state(false);
 let staged = $state([]);
 let sessionUi = $state({ customOpen: false, coverOpen: false });
 let sessionError = $state('');
+let sessionNames = $state({ authors: [], tags: [] });
 let quitRequest = $state(0);
 let editingBook = $derived(editIndex >= 0 ? sessionBooks[editIndex] : null);
 let sidebarVersion = $state(0);
@@ -154,6 +155,11 @@ onMount(() => {
       e.preventDefault();
       previewPanel?.openBook();
     }
+    // E opens the editor for the selected book, as V opens the book itself.
+    if (e.key.toLowerCase() === 'e' && !e.ctrlKey && !e.metaKey && !e.altKey && !typing && editIndex < 0) {
+      e.preventDefault();
+      openEditor();
+    }
     if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !typing && editIndex < 0) {
       e.preventDefault();
       const search = document.getElementById('lib-search');
@@ -224,6 +230,55 @@ function isWholeLibrary(f) {
   return f.author_id == null && f.series_id == null && f.tag_id == null && !f.search && f.custom_column_id == null && f.custom_value_id == null;
 }
 
+// Suggestions for the search box: the titles, authors and tags of the whole library that match what
+// has been typed. Those are what the search itself looks at, so a suggestion always finds something.
+const WHOLE = { author_id: null, series_id: null, tag_id: null, search: null, custom_column_id: null, custom_value_id: null };
+const fold = (s) => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+/** @type {any} */
+let suggestIndex = $state.raw(null);
+let suggestSource = null;
+
+function buildSuggestIndex(list) {
+  suggestSource = list;
+  const authors = new Set();
+  const tags = new Set();
+  for (const b of list) {
+    for (const a of b.authors.split('&')) if (a.trim()) authors.add(a.trim());
+    for (const t of b.tags) tags.add(t);
+  }
+  const keyed = (names) => names.map((text) => ({ text, key: fold(text) }));
+  suggestIndex = {
+    titles: keyed([...new Set(list.map((b) => b.title))]),
+    authors: keyed([...authors]),
+    tags: keyed([...tags])
+  };
+}
+
+// The list can be out of date after a save or a restore, so it is read again when the box is used.
+async function ensureSuggestIndex() {
+  if (suggestIndex && suggestSource === allBooks) return;
+  const list = allBooks ?? (await invoke('get_books_filtered', { filter: WHOLE }));
+  allBooks ??= list;
+  buildSuggestIndex(list);
+}
+
+function suggestSearch(fragment) {
+  if (!suggestIndex) return [];
+  const q = fold(fragment);
+  const find = (group, hint, limit) => {
+    const starts = [];
+    const inside = [];
+    for (const e of group) {
+      const at = e.key.indexOf(q);
+      if (at === 0) starts.push(e);
+        else if (at > 0) inside.push(e);
+      if (starts.length >= limit) break;
+    }
+    return [...starts, ...inside].slice(0, limit).map((e) => ({ text: e.text, hint }));
+  };
+  return [...find(suggestIndex.titles, 'Title', 4), ...find(suggestIndex.authors, 'Author', 3), ...find(suggestIndex.tags, 'Tag', 3)];
+}
+
 async function refreshBooks(keepId = null) {
   const seq = ++requestSeq;
   const whole = isWholeLibrary(currentFilter);
@@ -234,7 +289,8 @@ async function refreshBooks(keepId = null) {
     if (whole) allBooks = result;
   }
   books = result;
-  selectedBook = (keepId !== null && books.find((b) => b.id === keepId)) || (books.length ? books[0] : null);
+  if (whole && result !== suggestSource) buildSuggestIndex(result);
+  selectedBook = (keepId!== null && books.find((b) => b.id === keepId)) || (books.length ? books[0] : null);
 }
 
 async function handleFilterChange(filter) {
@@ -253,6 +309,16 @@ function handleReset() {
   refreshBooks();
 }
 
+// The dialog suggests the library's own authors and tags. They are read once per editing session.
+async function loadSessionNames() {
+  try {
+    const [authors, tags] = await Promise.all([invoke('get_authors'), invoke('get_tags')]);
+    sessionNames = { authors: authors.map((a) => a.name), tags: tags.map((t) => t.name) };
+  } catch {
+    sessionNames = { authors: [], tags: [] };
+  }
+}
+
 function openEditor() {
   if (!selectedBook) return;
   sessionBooks = books.slice();
@@ -260,6 +326,7 @@ function openEditor() {
   staged = [];
   sessionUi = { customOpen: false, coverOpen: false };
   sessionError = '';
+  loadSessionNames();
 }
 
 function quitApp() {
@@ -422,6 +489,7 @@ async function openLibrary() {
       draft={staged.find((s) => s.id === editingBook.id)?.draft ?? null}
       ui={sessionUi}
       startError={sessionError}
+      names={sessionNames}
       position={{ n: editIndex + 1, total: sessionBooks.length }}
       stagedElsewhere={staged.filter((s) => s.id !== editingBook.id).length}
       onNavigate={handleNavigate}
@@ -436,11 +504,11 @@ async function openLibrary() {
   <RestoreDialog onClose={() => (restoreOpen = false)} onRestored={handleRestored} />
 {/if}
 <div class="frame" inert={editingBook != null || restoreOpen}>
-  <TopBar bind:searchValue={searchTerm} onSearch={handleSearch} />
+  <TopBar bind:searchValue={searchTerm} onSearch={handleSearch} suggest={suggestSearch} onSearchFocus={ensureSuggestIndex} />
   <div class="body-row">
     <Sidebar onFilterChange={handleFilterChange} onReset={handleReset} libraryLoaded={libraryLoaded} refreshKey={sidebarVersion} libraryKey={libraryPath} />
     <div class="main-col" bind:this={mainColEl}>
-      <PreviewPanel bind:this={previewPanel} book={selectedBook} libraryLoaded={libraryLoaded} noResults={libraryLoaded && !books.length && !isWholeLibrary(currentFilter)} onEdit={openEditor} />
+      <PreviewPanel bind:this={previewPanel} book={selectedBook} libraryLoaded={libraryLoaded}  noResults={libraryLoaded && !books.length && !isWholeLibrary(currentFilter)} />
       <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div

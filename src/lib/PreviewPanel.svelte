@@ -2,7 +2,7 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import DOMPurify from 'dompurify';
 
-let { book, libraryLoaded, noResults = false, onEdit } = $props();
+let { book, libraryLoaded, noResults = false } = $props();
 
 let comments = $state(null);
 let openError = $state('');
@@ -45,33 +45,33 @@ let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null)
     <div class="meta">
       <div class="meta-scroll">
         <div class="meta-head">
-        <div>
-          <h1>{book.title}</h1>
-          {#if book.series}
-            <div class="series">{book.series}{book.series_index ? `, Book ${book.series_index}` : ''}</div>
+          <div>
+            <h1>{book.title}</h1>
+            {#if book.series}
+              <div class="series">{book.series}{book.series_index ? `, Book ${book.series_index}` : ''}</div>
+            {/if}
+          </div>
+
+          <div class="author">by {book.authors}</div>
+
+          {#if book.rating}
+            {@const stars = Math.floor(book.rating / 2)}
+            <div class="stars" role="img" aria-label="Rated {stars} out of 5">
+              {#each [1, 2, 3, 4, 5] as n}
+                <svg width="16" height="16" viewBox="0 0 24 24" fill={n <= stars ? 'var(--zen-red)' : 'none'} stroke="var(--zen-red)" stroke-width="1.5">
+                  <path d="M12 2l2.9 6.6 7.1.7-5.4 4.8 1.6 7-6.2-3.7-6.2 3.7 1.6-7-5.4-4.8 7.1-.7z" />
+                </svg>
+              {/each}
+            </div>
           {/if}
-        </div>
 
-        <div class="author">by {book.authors}</div>
-
-        {#if book.rating}
-          {@const stars = Math.floor(book.rating / 2)}
-          <div class="stars" role="img" aria-label="Rated {stars} out of 5">
-            {#each [1, 2, 3, 4, 5] as n}
-              <svg width="16" height="16" viewBox="0 0 24 24" fill={n <= stars ? 'var(--zen-red)' : 'none'} stroke="var(--zen-red)" stroke-width="1.5">
-                <path d="M12 2l2.9 6.6 7.1.7-5.4 4.8 1.6 7-6.2-3.7-6.2 3.7 1.6-7-5.4-4.8 7.1-.7z" />
-              </svg>
-            {/each}
-          </div>
-        {/if}
-
-        {#if book.tags?.length}
-          <div class="pills">
-            {#each book.tags as tag}
-              <span class="pill">{tag}</span>
-            {/each}
-          </div>
-        {/if}
+          {#if book.tags?.length}
+            <div class="pills">
+              {#each book.tags as tag}
+                <span class="pill">{tag}</span>
+              {/each}
+            </div>
+          {/if}
         </div>
 
         {#if sanitizedComments}
@@ -80,7 +80,6 @@ let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null)
 
       <div class="meta-actions">
         <button class="zen-btn btn-primary" onclick={openBook}>Open book</button>
-        <button class="zen-btn btn-secondary" onclick={onEdit}>Edit metadata</button>
         {#if openError}<span class="open-error">{openError}</span>{/if}
       </div>
     </div>
@@ -171,7 +170,6 @@ let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null)
 .pills { display: flex; flex-wrap: wrap; gap: 8px; }
 .pill { padding: 4px 12px; border-radius: 999px; font-size: 12px; background: var(--zen-pill-bg); color: var(--zen-text-secondary); }
 .btn-primary { height: 38px; padding: 0 18px; border-radius: 2px; background: var(--zen-red); color: white; font-size: 13px; font-weight: 500; }
-.btn-secondary { height: 38px; padding: 0 18px; border-radius: 2px; background: none; border: 1px solid var(--zen-ink); color: var(--zen-ink); font-size: 13px; font-weight: 500; }
 @container preview (max-height: 335px) and (min-width: 800px) {
   .meta {
     display: grid;
