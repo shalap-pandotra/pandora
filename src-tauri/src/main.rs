@@ -123,7 +123,6 @@ fn backup_once(app: &tauri::AppHandle, state: &State<AppState>) -> Result<(), St
         .collect();
     existing.sort_by(|a, b| b.0.cmp(&a.0));
 
-    // Nothing changed since the newest backup, so we already hold this exact state.
     if let Some((_, newest)) = existing.first() {
         if files_identical(&src, newest).unwrap_or(false) {
             *done = true;

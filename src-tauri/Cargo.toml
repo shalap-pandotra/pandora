@@ -11,8 +11,6 @@ opt-level = "z"
 codegen-units = 1
 strip = true
 
-# The image libraries do the heavy work when a cover is picked, so they get full speed
-# while the rest of the app stays small.
 [profile.release.package.image]
 opt-level = 3
 [profile.release.package.zune-jpeg]

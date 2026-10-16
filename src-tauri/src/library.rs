@@ -42,7 +42,7 @@ pub struct MultiTextColumn {
     pub label: String,
     pub name: String,
     pub is_hierarchical: bool,
-    pub values: Vec<GenreRow>, // reusing the same shape, id/value/count
+    pub values: Vec<GenreRow>, 
 }
 
 #[derive(Serialize)]
@@ -177,7 +177,6 @@ const AUTHOR_SUFFIXES: [&str; 13] = [
     "jr", "sr", "inc", "ph.d", "phd", "md", "m.d", "i", "ii", "iii", "iv", "junior", "senior",
 ];
 
-// Like Python's os.path.splitext: a name made only of dots has no extension.
 fn split_ext(s: &str) -> (&str, &str) {
     match s.rfind('.') {
         None => (s, ""),
@@ -237,7 +236,6 @@ fn path_limit(library_path: &str) -> usize {
     }
 }
 
-// Folder for a book, relative to the library. Uses only the first author.
 pub fn book_dir(library_path: &str, book_id: i64, title: &str, first_author: &str) -> String {
     let id_suffix = format!(" ({})", book_id);
     let l = path_limit(library_path).saturating_sub(id_suffix.len() / 2 + 2).max(1);
@@ -258,7 +256,6 @@ pub fn book_dir(library_path: &str, book_id: i64, title: &str, first_author: &st
     format!("{}/{}{}", author, title_part, id_suffix)
 }
 
-// Base name shared by every format file of a book, without the extension.
 pub fn book_file_base(library_path: &str, title: &str, first_author: &str) -> String {
     // Room is reserved for the extension, at least 14 characters, so half of that is 7.
     let l = path_limit(library_path).saturating_sub(7 + 2).max(1);
@@ -278,11 +275,11 @@ pub fn author_sort_for(stored_name: &str) -> String {
     if tokens.len() < 2 {
         return author.to_string();
     }
-    // Names containing a "copy word" like Corporation are left unchanged.
+   
     if tokens.iter().any(|t| AUTHOR_COPY_WORDS.contains(&t.to_lowercase().as_str())) {
         return author.to_string();
     }
-    // Leading prefixes such as Dr. are dropped from the sort entirely.
+  
     let is_prefix =
     |t: &str| AUTHOR_PREFIXES.contains(&t.trim_end_matches('.').to_lowercase().as_str());
     while !tokens.is_empty() && is_prefix(tokens[0]) {
@@ -291,7 +288,7 @@ pub fn author_sort_for(stored_name: &str) -> String {
     if tokens.is_empty() {
         return author.to_string();
     }
-    // Trailing suffixes such as Jr. move to the end of the result.
+ 
     let is_suffix =
     |t: &str| AUTHOR_SUFFIXES.contains(&t.trim_end_matches('.').to_lowercase().as_str());
     let mut suffix: Vec<&str> = Vec::new();
@@ -301,7 +298,7 @@ pub fn author_sort_for(stored_name: &str) -> String {
     if tokens.is_empty() {
         return author.to_string();
     }
-    // A name that already contains a comma is copied unchanged.
+
     if tokens.join("").contains(',') {
         return author.to_string();
     }
@@ -324,7 +321,7 @@ pub fn author_sort_for(stored_name: &str) -> String {
 mod author_sort_tests {
     use super::author_sort_for;
 
-    // Every expected value below was copied from what calibre produced on your library.
+
     #[test]
     fn author_sort_matches_calibre() {
         let cases = [
@@ -359,7 +356,7 @@ pub struct PickerBook {
     pub authors: String,
 }
 
-/// Every book that has an EPUB, by title and author only, for the reader's Ctrl+O picker.
+
 pub fn epub_books(conn: &Connection) -> rusqlite::Result<Vec<PickerBook>> {
     let mut stmt = conn.prepare(
         "SELECT b.id, b.title,
@@ -380,7 +377,6 @@ pub fn epub_books(conn: &Connection) -> rusqlite::Result<Vec<PickerBook>> {
     rows.collect()
 }
 
-/// Where a book's EPUB sits on disk, if it has one.
 pub fn epub_path(conn: &Connection, library_path: &str, book_id: i64) -> rusqlite::Result<Option<PathBuf>> {
     conn.query_row(
         "SELECT b.path, d.name FROM books b JOIN data d ON d.book = b.id
@@ -395,7 +391,6 @@ pub fn epub_path(conn: &Connection, library_path: &str, book_id: i64) -> rusqlit
     .optional()
 }
 
-/// calibre's own uuid for a book, if it has one.
 pub fn book_uuid(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<String>> {
     conn.query_row("SELECT uuid FROM books WHERE id = ?1", [book_id], |row| row.get::<_, Option<String>>(0))
         .optional()
@@ -416,7 +411,6 @@ pub fn book_uuid_and_title(conn: &Connection, book_id: i64) -> rusqlite::Result<
 
 pub fn open_library(library_path: &str) -> rusqlite::Result<Connection> {
     let db_path = PathBuf::from(library_path).join("metadata.db");
-    // Read-only for everything except saving edits
     Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
 }
 
@@ -424,7 +418,6 @@ pub fn open_library_rw(library_path: &str) -> rusqlite::Result<Connection> {
     let db_path = PathBuf::from(library_path).join("metadata.db");
     let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     conn.busy_timeout(std::time::Duration::from_millis(2000))?;
-    // Calibre's triggers call this function, and it lives outside the database.
     conn.create_scalar_function(
         "title_sort",
         1,
@@ -456,8 +449,6 @@ pub struct MetadataEdit {
     pub rating: Option<i64>,      // None means unchanged, 0 clears, 1 to 5 sets stars
 }
 
-// Each field only runs if it was actually changed. One transaction covers all of
-// them, so a failure part way through leaves the library untouched.
 #[derive(serde::Deserialize)]
 pub struct BatchItem {
     pub book_id: i64,
@@ -470,10 +461,6 @@ pub struct BatchError {
     pub message: String,
 }
 
-// Saves several books in one transaction. Edits are applied in the order given, so when two
-// books touch the same shared value (a recase, say), the later edit wins, as it would if they
-// were saved one at a time. If any book fails, every folder move and cover change made so far
-// is undone, and nothing is committed.
 pub fn write_metadata_batch(
     conn: &mut Connection,
     library_path: &str,
@@ -526,9 +513,7 @@ struct FsLog {
 }
 
 impl FsLog {
-    // Best effort, in reverse order: recreate removed folders, move things back, drop new folders.
     fn undo(&self) {
-        // The cover lives in the book's final folder, so it goes back before any folder moves.
         if let Some((file, previous)) = &self.cover {
             match previous {
                 Some(bytes) => {
@@ -555,7 +540,6 @@ struct BookPlan {
     id: i64,
     old_path: String,
     new_path: String,
-    // data row id, format, old base name, new base name
     files: Vec<(i64, String, String, String)>,
 }
 
@@ -585,7 +569,6 @@ fn apply_title(tx: &Connection, book_id: i64, title: &str) -> rusqlite::Result<(
     Ok(())
 }
 
-// books.author_sort is the authors' own sorts joined with " & ", in link order.
 fn rebuild_author_sort(tx: &Connection, book_id: i64) -> rusqlite::Result<()> {
     let sorts: Vec<String> = {
         let mut stmt = tx.prepare(
@@ -609,9 +592,6 @@ fn rebuild_author_sort(tx: &Connection, book_id: i64) -> rusqlite::Result<()> {
     Ok(())
 }
 
-// After an author is renamed, calibre recomputes the sort of that author's books from the
-// author names, and leaves the author rows' own sort alone. Co-authors who were not renamed
-// keep their stored sort. That mixed case is a guess, not verified against calibre.
 fn rebuild_author_sort_after_rename(tx: &Connection, book_id: i64, renamed: &[i64]) -> rusqlite::Result<()> {
     let parts: Vec<String> = {
         let mut stmt = tx.prepare(
@@ -639,7 +619,6 @@ fn rebuild_author_sort_after_rename(tx: &Connection, book_id: i64, renamed: &[i6
     Ok(())
 }
 
-// Returns the ids of authors whose name was renamed (capitalization changed).
 fn apply_authors(tx: &Connection, book_id: i64, names: &[String]) -> rusqlite::Result<Vec<i64>> {
     // Commas are stored as "|", and only "&" separates authors, as in calibre.
     let mut wanted: Vec<String> = Vec::new();
@@ -673,7 +652,6 @@ fn apply_authors(tx: &Connection, book_id: i64, names: &[String]) -> rusqlite::R
         let id = match existing {
             Some((id, current, _sort)) => {
                 if current != *name {
-                    // Calibre renames the shared row and leaves the author's own sort alone.
                     tx.execute(
                         "UPDATE authors SET name = ?1 WHERE id = ?2",
                         rusqlite::params![name, id],
@@ -703,7 +681,6 @@ fn apply_authors(tx: &Connection, book_id: i64, names: &[String]) -> rusqlite::R
                 [book_id, *id],
             )?;
         }
-        // Calibre drops authors that no book uses anymore.
         for id in old_ids.iter().filter(|id| !new_ids.contains(id)) {
             tx.execute(
                 "DELETE FROM authors WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM books_authors_link WHERE author = ?1)",
@@ -728,7 +705,6 @@ fn apply_authors(tx: &Connection, book_id: i64, names: &[String]) -> rusqlite::R
     Ok(renamed)
 }
 
-// What a book's folder and file names should be, compared with what is stored.
 fn plan_for(tx: &Connection, library_path: &str, book_id: i64) -> rusqlite::Result<BookPlan> {
     let (title, old_path): (String, String) = tx.query_row(
         "SELECT title, path FROM books WHERE id = ?1",
@@ -757,7 +733,6 @@ fn plan_for(tx: &Connection, library_path: &str, book_id: i64) -> rusqlite::Resu
     Ok(BookPlan { id: book_id, old_path, new_path, files })
 }
 
-// Never overwrites. A change in capitalization only goes through a temporary name.
 fn move_path(from: &std::path::Path, to: &std::path::Path, log: &mut FsLog) -> Result<(), String> {
     let case_only = from != to
     && from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase();
@@ -783,10 +758,8 @@ fn move_path(from: &std::path::Path, to: &std::path::Path, log: &mut FsLog) -> R
 }
 
 fn fs_steps(lib: &std::path::Path, plans: &[BookPlan], log: &mut FsLog) -> Result<(), String> {
-    // Where each book folder is right now, relative to the library. Starts at the old path.
     let mut current: Vec<String> = plans.iter().map(|p| p.old_path.clone()).collect();
 
-    // 1. An author folder that only changed capitalization is renamed once, for all its books.
     let mut renamed_dirs: Vec<String> = Vec::new();
     for p in plans.iter().filter(|p| !p.old_path.is_empty()) {
         let old_a = author_dir_of(&p.old_path).to_string();
@@ -809,7 +782,6 @@ fn fs_steps(lib: &std::path::Path, plans: &[BookPlan], log: &mut FsLog) -> Resul
         }
     }
 
-    // 2. Rename the format files inside each book folder.
     for (i, p) in plans.iter().enumerate() {
         if p.old_path.is_empty() {
             continue;
@@ -828,7 +800,6 @@ fn fs_steps(lib: &std::path::Path, plans: &[BookPlan], log: &mut FsLog) -> Resul
         }
     }
 
-    // 3. Move each book folder to its new location.
     for (i, p) in plans.iter().enumerate() {
         if p.old_path.is_empty() || current[i] == p.new_path {
             continue;
@@ -849,7 +820,6 @@ fn fs_steps(lib: &std::path::Path, plans: &[BookPlan], log: &mut FsLog) -> Resul
         current[i] = p.new_path.clone();
     }
 
-    // 4. Remove old author folders that are now empty, like calibre does.
     let mut old_dirs: Vec<String> = plans
         .iter()
         .filter(|p| !p.old_path.is_empty())
@@ -888,8 +858,6 @@ pub enum CoverEdit {
     Remove,
 }
 
-// Sizes and quality as measured on a real calibre library: a JPEG inside the box is kept
-// as it is, a bigger one is scaled to fit, and anything else becomes a JPEG at quality 90.
 const COVER_MAX_W: u32 = 1650;
 const COVER_MAX_H: u32 = 2200;
 const COVER_QUALITY: u8 = 90;
@@ -903,8 +871,6 @@ struct PreparedCover {
     note: String,
 }
 
-// Fits inside the box without changing the shape. The second side is truncated, not rounded,
-// which is what calibre does (3182x4500 becomes 1555x2200).
 fn fit_inside(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
     let (w, h, mw, mh) = (w as u64, h as u64, max_w as u64, max_h as u64);
     if w * mh > h * mw {
@@ -914,7 +880,6 @@ fn fit_inside(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
     }
 }
 
-// Transparent areas become white, since a JPEG can't be transparent.
 fn flatten_on_white(img: &image::DynamicImage) -> image::RgbImage {
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
@@ -937,8 +902,6 @@ fn encode_jpeg(img: &image::DynamicImage, quality: u8) -> Result<Vec<u8>, String
     Ok(out)
 }
 
-// The last prepared cover is kept in memory. The dialog prepares it when a file is picked,
-// and saving reuses it instead of doing the work a second time.
 static COVER_CACHE: std::sync::Mutex<Option<(String, u64, u128, PreparedCover)>> =
 std::sync::Mutex::new(None);
 
@@ -949,7 +912,6 @@ fn file_key(path: &str) -> Option<(u64, u128)> {
 }
 
 fn make_preview(img: &image::DynamicImage) -> Result<Vec<u8>, String> {
-    // thumbnail() is a fast scaler, which is plenty for an on-screen preview.
     let thumb = if img.width() > 600 || img.height() > 800 {
         img.thumbnail(600, 800)
     } else {
@@ -1014,7 +976,6 @@ pub struct CoverPreview {
     pub note: String,
 }
 
-// What the dialog shows after a file is picked. A bad file is rejected here.
 pub fn preview_cover(path: &str) -> Result<CoverPreview, String> {
     let prepared = prepare_cover(path)?;
     use base64::Engine;
@@ -1029,7 +990,6 @@ pub fn preview_cover(path: &str) -> Result<CoverPreview, String> {
     })
 }
 
-// Writes next to the target and renames over it, so a failure never leaves half a cover.
 fn write_replacing(file: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     let mut tmp = file.as_os_str().to_owned();
     tmp.push(".pandora-tmp");
@@ -1042,8 +1002,6 @@ fn write_replacing(file: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-// Calibre keeps a book's cover as cover.jpg in its folder, plus a has_cover flag.
-// The previous file is held in memory until the save is committed, so a failure puts it back.
 fn apply_cover(tx: &Connection, library_path: &str, book_id: i64, cover: &CoverEdit, log: &mut FsLog) -> Result<(), String> {
     let rel: String = db(tx.query_row("SELECT path FROM books WHERE id = ?1", [book_id], |row| row.get(0)))?;
     let file = std::path::Path::new(library_path).join(rel).join("cover.jpg");
@@ -1080,8 +1038,6 @@ fn apply_edit(tx: &Connection, library_path: &str, book_id: i64, edit: &Metadata
         }
     }
 
-    // Books whose folder or file names may change: this book, plus every book whose first
-    // author is an author that was just renamed.
     let mut affected: Vec<i64> = Vec::new();
     if edit.title.is_some() || edit.authors.is_some() {
         affected.push(book_id);
@@ -1161,8 +1117,6 @@ pub struct CustomEdit {
     pub values: Vec<String>,
 }
 
-// Multi value text columns the user may edit. Skips columns calibre marked as not editable
-// or about to be deleted. Returns (id, name, is_names).
 fn editable_text_columns(conn: &Connection) -> rusqlite::Result<Vec<(i64, String, bool)>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, display FROM custom_columns \
@@ -1188,8 +1142,6 @@ fn query_strings(conn: &Connection, sql: &str, params: impl rusqlite::Params) ->
     Ok(found)
 }
 
-// What the edit dialog needs: each editable column, this book's values, and every existing
-// value of that column for suggestions.
 pub fn custom_editor_data(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<CustomEditorColumn>> {
     let mut out = Vec::new();
     for (id, name, is_names) in editable_text_columns(conn)? {
@@ -1219,8 +1171,6 @@ pub fn custom_editor_data(conn: &Connection, book_id: i64) -> rusqlite::Result<V
     Ok(out)
 }
 
-// Same rules as tags: match ignoring case, rename the shared row when the capitalization
-// differs, and delete values no book uses anymore.
 fn write_custom_values(conn: &Connection, book_id: i64, col: i64, is_names: bool, values: &[String]) -> rusqlite::Result<()> {
     let table = format!("custom_column_{}", col);
     let link = format!("books_custom_column_{}_link", col);
@@ -1292,7 +1242,6 @@ fn write_custom_values(conn: &Connection, book_id: i64, col: i64, is_names: bool
     Ok(())
 }
 
-// Refuses any column that isn't an editable multi value text column.
 fn apply_custom_values(tx: &Connection, book_id: i64, column_id: i64, values: &[String]) -> Result<(), String> {
     let cols = db(editable_text_columns(tx))?;
     let (id, _name, is_names) = cols
@@ -1309,7 +1258,6 @@ pub struct IdentifierEdit {
     pub val: String,
 }
 
-// "YYYY-MM-DD HH:MM:SS+00:00", the form calibre stores dates in. 0101-01-01 means undefined.
 pub fn valid_stored_date(s: &str) -> bool {
     if !s.is_ascii() || s.len() != 25 || !s.ends_with("+00:00") {
         return false;
@@ -1321,8 +1269,6 @@ pub fn valid_stored_date(s: &str) -> bool {
     && b[16] == b':' && digits(17, 19)
 }
 
-// Same rules as series: match ignoring case, rename the shared row when the capitalization
-// differs, and delete a publisher no book uses anymore.
 fn apply_publisher(conn: &Connection, book_id: i64, name: &str) -> rusqlite::Result<()> {
     let name = name.trim();
     let old_id: Option<i64> = conn
@@ -1370,7 +1316,6 @@ fn apply_publisher(conn: &Connection, book_id: i64, name: &str) -> rusqlite::Res
     Ok(())
 }
 
-// Replaces the book's whole identifier list. One value per type, types lowercased.
 fn apply_identifiers(conn: &Connection, book_id: i64, items: &[IdentifierEdit]) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM identifiers WHERE book = ?1", [book_id])?;
     let mut seen: Vec<String> = Vec::new();
@@ -1445,8 +1390,6 @@ pub struct LanguageOption {
     pub name: String,
 }
 
-// The common languages (those with a two letter code) and their three letter codes. Calibre
-// writes ISO 639-2/T codes, which match these for every language in this list.
 pub fn language_options() -> Vec<LanguageOption> {
     let mut out: Vec<LanguageOption> = isolang::languages()
         .filter(|l| l.to_639_1().is_some())
@@ -1463,7 +1406,6 @@ pub fn valid_language_code(code: &str) -> bool {
     isolang::Language::from_639_3(&code.to_lowercase()).is_some()
 }
 
-// Languages are shared rows keyed by their code, and the link table keeps the order.
 fn apply_languages(conn: &Connection, book_id: i64, codes: &[String]) -> rusqlite::Result<()> {
     let mut wanted: Vec<String> = Vec::new();
     for c in codes {
@@ -1501,8 +1443,6 @@ fn apply_languages(conn: &Connection, book_id: i64, codes: &[String]) -> rusqlit
         )?;
         new_ids.push(id);
     }
-    // Same cleanup as tags and series. Whether calibre also drops unused languages is
-    // one of the tests below.
     for id in old_ids.iter().filter(|id| !new_ids.contains(id)) {
         conn.execute(
             "DELETE FROM languages WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM books_languages_link WHERE lang_code = ?1)",
@@ -1511,8 +1451,6 @@ fn apply_languages(conn: &Connection, book_id: i64, codes: &[String]) -> rusqlit
     }
     Ok(())
 }
-
-// Comments, rating, tags and series, which never touch the disk.
 
 fn apply_basic_fields(tx: &Connection, book_id: i64, edit: &MetadataEdit) -> rusqlite::Result<()> {
     if let Some(name) = &edit.publisher {
@@ -1542,7 +1480,6 @@ fn apply_basic_fields(tx: &Connection, book_id: i64, edit: &MetadataEdit) -> rus
     match (&edit.series, edit.series_index) {
         (Some(name), idx) => apply_series(&tx, book_id, name, idx)?,
         (None, Some(idx)) => {
-            // Index changed on its own. Only meaningful if the book has a series.
             let has_series: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM books_series_link WHERE book = ?1)",
                 [book_id],
@@ -1564,7 +1501,6 @@ fn apply_basic_fields(tx: &Connection, book_id: i64, edit: &MetadataEdit) -> rus
     Ok(())
 }
 
-// Empty text removes the comments row, which is what calibre does.
 fn apply_comments(conn: &Connection, book_id: i64, text: &str) -> rusqlite::Result<()> {
     if text.trim().is_empty() {
         conn.execute("DELETE FROM comments WHERE book = ?1", [book_id])?;
@@ -1584,7 +1520,6 @@ fn apply_comments(conn: &Connection, book_id: i64, text: &str) -> rusqlite::Resu
 }
 
 fn apply_tags(conn: &Connection, book_id: i64, tags: &[String]) -> rusqlite::Result<()> {
-    // Trim, drop empties, and dedupe ignoring ASCII case, which is how the tags table compares names.
     let mut wanted: Vec<String> = Vec::new();
     for t in tags {
         let t = t.trim();
@@ -1599,8 +1534,6 @@ fn apply_tags(conn: &Connection, book_id: i64, tags: &[String]) -> rusqlite::Res
         rows.collect::<Result<_, _>>()?
     };
 
-    // Reuse an existing tag row when one matches ignoring case (renaming it to the new
-    // spelling, like calibre does), otherwise create it.
     let mut new_ids: Vec<i64> = Vec::new();
     for name in &wanted {
         let existing: Option<(i64, String)> = conn
@@ -1612,8 +1545,6 @@ fn apply_tags(conn: &Connection, book_id: i64, tags: &[String]) -> rusqlite::Res
             .optional()?;
         let id = match existing {
             Some((id, current)) => {
-                // Calibre renames the shared row when the capitalization differs,
-                // so every book with this tag shows the new spelling.
                 if current != *name {
                     conn.execute(
                         "UPDATE tags SET name = ?1 WHERE id = ?2",
@@ -1637,7 +1568,6 @@ fn apply_tags(conn: &Connection, book_id: i64, tags: &[String]) -> rusqlite::Res
             "DELETE FROM books_tags_link WHERE book = ?1 AND tag = ?2",
             [book_id, *id],
         )?;
-        // Calibre drops tags nothing uses anymore. Only tags this edit un-linked are checked.
         conn.execute(
             "DELETE FROM tags WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM books_tags_link WHERE tag = ?1)",
             [*id],
@@ -1652,8 +1582,6 @@ fn apply_tags(conn: &Connection, book_id: i64, tags: &[String]) -> rusqlite::Res
     Ok(())
 }
 
-// Moves this book to the named series. If the name matches an existing series ignoring
-// case, that shared row takes the new spelling for every book, as calibre does.
 fn apply_series(conn: &Connection, book_id: i64, series: &str, index: Option<f64>) -> rusqlite::Result<()> {
     let name = series.trim();
     let old_id: Option<i64> = conn
@@ -1673,8 +1601,6 @@ fn apply_series(conn: &Connection, book_id: i64, series: &str, index: Option<f64
             .optional()?;
         let new_id = match existing {
             Some((id, current)) => {
-                // Same as tags: calibre renames the shared row when only the
-                // capitalization differs. series_update_trg refreshes the sort value.
                 if current != name {
                     conn.execute(
                         "UPDATE series SET name = ?1 WHERE id = ?2",
@@ -1683,7 +1609,6 @@ fn apply_series(conn: &Connection, book_id: i64, series: &str, index: Option<f64
                 }
                 id
             }
-            // The series_insert_trg trigger fills in the sort value.
             None => {
                 conn.execute("INSERT INTO series (name) VALUES (?1)", [name])?;
                 conn.last_insert_rowid()
@@ -1704,7 +1629,6 @@ fn apply_series(conn: &Connection, book_id: i64, series: &str, index: Option<f64
         }
     }
 
-    // Calibre drops series nothing uses anymore. Only the series this edit left is checked.
     if let Some(old) = old_id {
         conn.execute(
             "DELETE FROM series WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM books_series_link WHERE series = ?1)",
@@ -1714,7 +1638,6 @@ fn apply_series(conn: &Connection, book_id: i64, series: &str, index: Option<f64
     Ok(())
 }
 
-// Next whole number after the highest index in that series, or 1 for a new series.
 pub fn next_series_index(conn: &Connection, series: &str) -> rusqlite::Result<f64> {
     let max: Option<f64> = conn.query_row(
         "SELECT MAX(b.series_index) FROM books b
@@ -1730,8 +1653,6 @@ WHERE s.name = ?1 COLLATE NOCASE",
     })
 }
 
-// Calibre stores stars times two (0 to 10), with one shared row per value in `ratings`.
-// No stars means no link row at all.
 fn apply_rating(conn: &Connection, book_id: i64, stars: i64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM books_ratings_link WHERE book = ?1", [book_id])?;
     if stars > 0 {
