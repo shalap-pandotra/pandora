@@ -6,6 +6,7 @@ import Sidebar from '../lib/Sidebar.svelte';
 import { onMount } from 'svelte';
 import PreviewPanel from '../lib/PreviewPanel.svelte';
 import EditMetadataModal from '../lib/EditMetadataModal.svelte';
+import RestoreDialog from '../lib/RestoreDialog.svelte';
 import BookList from '../lib/BookList.svelte';
 import StatusBar from '../lib/StatusBar.svelte';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -17,6 +18,7 @@ let books = $state([]);
 let selectedBook = $state(null);
 let sessionBooks = $state([]);
 let editIndex = $state(-1);
+let restoreOpen = $state(false);
 let staged = $state([]);
 let sessionUi = $state({ customOpen: false, coverOpen: false });
 let sessionError = $state('');
@@ -318,6 +320,14 @@ async function handleSave(entry) {
   await refreshBooks(current);
 }
 
+// A restore changed the database and perhaps the folders, so everything on screen is read again.
+async function handleRestored() {
+  restoreOpen = false;
+  sidebarVersion += 1;
+  allBooks = null;
+  await refreshBooks(selectedBook?.id ?? null);
+}
+
 function handleSelectBook(book) {
   selectedBook = book;
 }
@@ -422,12 +432,15 @@ async function openLibrary() {
     />
   {/key}
 {/if}
-<div class="frame" inert={editingBook != null}>
+{#if restoreOpen}
+  <RestoreDialog onClose={() => (restoreOpen = false)} onRestored={handleRestored} />
+{/if}
+<div class="frame" inert={editingBook != null || restoreOpen}>
   <TopBar bind:searchValue={searchTerm} onSearch={handleSearch} />
   <div class="body-row">
     <Sidebar onFilterChange={handleFilterChange} onReset={handleReset} libraryLoaded={libraryLoaded} refreshKey={sidebarVersion} libraryKey={libraryPath} />
     <div class="main-col" bind:this={mainColEl}>
-      <PreviewPanel bind:this={previewPanel} book={selectedBook} libraryLoaded={libraryLoaded} onEdit={openEditor} />
+      <PreviewPanel bind:this={previewPanel} book={selectedBook} libraryLoaded={libraryLoaded} noResults={libraryLoaded && !books.length && !isWholeLibrary(currentFilter)} onEdit={openEditor} />
       <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div
@@ -442,7 +455,7 @@ async function openLibrary() {
         onpointerdown={startDrag}
         onkeydown={handleResizerKeydown}
       ></div>
-      <BookList {books} onSelectBook={handleSelectBook} onEdit={openEditor} height={gridHeight} />
+      <BookList {books} selectedId={selectedBook?.id} onSelectBook={handleSelectBook} onEdit={openEditor} onRestore={() => { if (libraryLoaded) restoreOpen = true; }} height={gridHeight} />
     </div>
   </div>
   <StatusBar libraryName={libraryPath.split(/[\\/]/).pop()} bookCount={books.length} />

@@ -23,6 +23,8 @@
     "allow-get-comments",
     "allow-get-next-series-index",
     "allow-save-metadata-batch",
+    "allow-list-backups",
+    "allow-restore-backup",
     "allow-get-custom-editor",
     "allow-get-edit-extras",
     "allow-preview-cover",

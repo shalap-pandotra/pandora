@@ -9,6 +9,8 @@ fn main() {
         "get_comments",
         "get_next_series_index",
         "save_metadata_batch",
+        "list_backups",
+        "restore_backup",
         "get_custom_editor",
         "get_edit_extras",
         "preview_cover",
@@ -24,5 +26,5 @@ fn main() {
         "reader_replace",
         "reader_revert",
     ])))
-    .expect("failed to run tauri-build")
+        .expect("failed to run tauri-build")
 }

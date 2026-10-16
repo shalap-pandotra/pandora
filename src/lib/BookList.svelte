@@ -2,7 +2,15 @@
 import { convertFileSrc } from '@tauri-apps/api/core';
 import VirtualGrid from './VirtualGrid.svelte';
 
-let { books = [], onSelectBook, onEdit, height = 224 } = $props();
+let { books = [], selectedId = null, onSelectBook, onEdit, onRestore, height = 224 } = $props();
+
+// The card the arrow keys carry on from. It follows the selected book, so tabbing into the grid
+// lands on the book shown in the preview.
+let active = $state(0);
+$effect(() => {
+  const at = books.findIndex((b) => b.id === selectedId);
+  active = at >= 0 ? at : 0;
+});
 
 // The tool buttons above the grid. Only Edit metadata does anything so far.
 const tools = [
@@ -11,7 +19,8 @@ const tools = [
   { label: 'Edit metadata', path: 'M4 20h4L19 9a2.1 2.1 0 00-3-3L5 17zM14.5 7.5l3 3', run: () => onEdit?.() },
   { label: 'Convert books', path: 'M4 8h14M14 4l4 4-4 4M20 16H6M10 12l-4 4 4 4' },
   { label: 'Save to disk', path: 'M5 3h11l4 4v13a1 1 0 01-1 1H5a1 1 0 01-1-1V4a1 1 0 011-1zM8 3v5h7V3M7 21v-7h10v7' },
-  { label: 'Connect / share', path: 'M15 5a3 3 0 1 0 6 0a3 3 0 1 0-6 0M3 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0M15 19a3 3 0 1 0 6 0a3 3 0 1 0-6 0M8.6 13.5l6.8 4M15.4 6.5l-6.8 4' }
+  { label: 'Connect / share', path: 'M15 5a3 3 0 1 0 6 0a3 3 0 1 0-6 0M3 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0M15 19a3 3 0 1 0 6 0a3 3 0 1 0-6 0M8.6 13.5l6.8 4M15.4 6.5l-6.8 4' },
+  { label: 'Restore from backup', path: 'M3 12a9 9 0 1 0 2.6-6.4L3 8M3 3v5h5M12 7v5l3 2', run: () => onRestore?.() }
 ];
 
 // Grid or table. Only the grid is drawn so far.
@@ -42,9 +51,9 @@ let view = $state('grid');
   </div>
 
   <div class="scroller">
-    <VirtualGrid items={books} itemWidth={78} itemHeight={131} gap={16}>
-      {#snippet cell(book)}
-        <button type="button" class="zen-btn zen-card card" onclick={() => onSelectBook?.(book)}>
+    <VirtualGrid items={books} itemWidth={78} itemHeight={131} gap={16} bind:active onMove={(_at, book) => onSelectBook?.(book)}>
+      {#snippet cell(book, index, tabindex)}
+        <button type="button" class="zen-btn zen-card card" data-index={index} {tabindex} onclick={() => onSelectBook?.(book)}>
           {#if book.cover_path}
             <img class="cover" src={convertFileSrc(book.cover_path) + '?v=' + book.cover_version} alt={book.title} loading="lazy" />
           {:else}
@@ -111,7 +120,8 @@ let view = $state('grid');
 }
 .view-btn + .view-btn { border-left: 1px solid var(--zen-border); }
 .view-btn.on { background: var(--zen-red); color: #FFFFFF; }
-.card { display: flex; flex-direction: column; gap: 6px; border-radius: 8px; padding: 6px; }
+.card { display: flex; flex-direction: column; gap: 6px; border-radius: 2px !important; }
+.card:focus { outline: none; background: #F7C7CE; }
 .cover { width: 100%; aspect-ratio: 2/3; border-radius: 2px; box-shadow: 0 3px 8px rgba(27,28,30,0.12); object-fit: cover; }
 .cover.fallback { 
   background: var(--zen-red-dark);

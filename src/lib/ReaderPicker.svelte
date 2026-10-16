@@ -87,7 +87,9 @@ onMount(() => {
         bind:this={searchEl}
         bind:value={query}
       />
-      <button class="zen-btn browse" onclick={onBrowse}>Browse…</button>
+      <button class="zen-btn browse" aria-label="Browse files" title="Browse files" onclick={onBrowse}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" /></svg>
+      </button>
     </div>
     {#if error}<div class="note error">{error}</div>{/if}
     <div class="list" bind:this={listEl}>
@@ -141,9 +143,11 @@ onMount(() => {
 }
 .search:focus { outline: none; border-color: var(--zen-ink); }
 .browse {
-  flex: none; height: 32px; padding: 0 14px; border-radius: 2px;
-  border: 1px solid var(--zen-ink); color: var(--zen-ink); font-size: 13px;
+  flex: none; width: 32px; height: 32px; padding: 0; border-radius: 2px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--zen-ink); color: var(--zen-ink);
 }
+.browse svg, .browse svg path { stroke-width: 2px !important; }
 .list { overflow-y: auto; min-height: 0; padding: 4px 0; }
 .row {
   display: flex; flex-direction: column; align-items: flex-start; gap: 2px;

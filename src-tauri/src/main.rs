@@ -4,6 +4,7 @@
 
 mod library;
 mod reader;
+mod restore;
 
 use std::sync::Mutex;
 use tauri::State;
@@ -266,8 +267,8 @@ async fn save_metadata_batch(
         }
         Ok(())
     })
-    .await
-    .map_err(|e| library::BatchError { book_id: None, message: e.to_string() })?
+        .await
+        .map_err(|e| library::BatchError { book_id: None, message: e.to_string() })?
 }
 
 #[tauri::command]
@@ -393,6 +394,50 @@ fn save_reader_position(app: tauri::AppHandle, key: String, position: reader::Po
     reader::set_position(&app, key, position)
 }
 
+/// The backups of the open library that a restore can go back to.
+#[tauri::command(async)]
+fn list_backups(app: tauri::AppHandle, state: State<AppState>) -> Result<Vec<restore::BackupInfo>, String> {
+    let library = get_path(&state)?;
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?.join("backups");
+    Ok(restore::list_backups(&dir, std::path::Path::new(&library)))
+}
+
+/// Puts the open library back the way one of its backups had it. See restore.rs.
+#[tauri::command]
+async fn restore_backup(
+    app: tauri::AppHandle,
+    file: String,
+    state: State<'_, AppState>,
+) -> Result<restore::RestoreReport, String> {
+    let library = get_path(&state)?;
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?.join("backups");
+    // Windows will not replace a file that is open, so Pandora lets go of its own copy first.
+    *state.conn.lock().unwrap() = None;
+    let for_restore = library.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        restore::restore(&dir, std::path::Path::new(&for_restore), &file, now)
+    })
+        .await
+        .map_err(|e| e.to_string())?;
+    // Whatever happened, the library is opened again.
+    match library::open_library(&library) {
+        Ok(conn) => *state.conn.lock().unwrap() = Some(conn),
+        Err(e) => {
+            return Err(if result.is_ok() {
+                format!("The library was restored but could not be opened again: {}. Close Pandora and open it again.", e)
+            } else {
+                    format!("The library could not be opened again: {}", e)
+                })
+        }
+    }
+    *state.backed_up.lock().unwrap() = false;
+    result
+}
+
 fn main() {
     tauri::Builder::default()
         // Must come first, so a second launch is caught before anything else starts.
@@ -425,6 +470,8 @@ fn main() {
             get_comments,
             get_next_series_index,
             save_metadata_batch,
+            list_backups,
+            restore_backup,
             get_custom_editor,
             get_edit_extras,
             preview_cover,

@@ -2,7 +2,7 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import DOMPurify from 'dompurify';
 
-let { book, libraryLoaded, onEdit } = $props();
+let { book, libraryLoaded, noResults = false, onEdit } = $props();
 
 let comments = $state(null);
 let openError = $state('');
@@ -87,10 +87,12 @@ let sanitizedComments = $derived(comments ? DOMPurify.sanitize(comments) : null)
 
   {:else}
     <div class="empty">
-      {#if libraryLoaded}
-        Select a book to preview it here.
-      {:else}
+      {#if !libraryLoaded}
         Hint: Press Ctrl+O to add your existing Calibre Library
+      {:else if noResults}
+        That turned up no results.
+      {:else}
+        Select a book to preview it here.
       {/if}
     </div>
   {/if}

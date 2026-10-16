@@ -80,6 +80,26 @@ function blockScripts(html) {
   return NO_SCRIPTS + html;
 }
 
+// A book can colour its own selection, with !important, a more specific selector, or by also setting
+// the selected text's colour, and would then win over the app's pale pink. Its selection rules are
+// taken out of its styles before the page is built, so the app's colour is the only one. A rule that
+// also styles other things (a, ::selection { ... }) keeps those other selectors.
+const SELECTION_RULE = /([^{}]*::(?:-moz-)?selection[^{}]*)\{([^{}]*)\}/gi;
+
+function withoutSelectionRules(/** @type {string} */ css) {
+  return css.replace(SELECTION_RULE, (_all, selectors, body) => {
+    const kept = selectors.split(',').filter((/** @type {string} */ s) => !/::(?:-moz-)?selection/i.test(s));
+    return kept.length ? `${kept.join(',')}{${body}}` : '';
+  });
+}
+
+/** A stylesheet, or the style blocks inside a page. */
+function dropSelectionStyles(/** @type {any} */ data, /** @type {string} */ type) {
+  if (typeof data !== 'string') return data;
+  if (type === 'text/css') return withoutSelectionRules(data);
+  return data.replace(/(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi, (_m, open, css, close) => open + withoutSelectionRules(css) + close);
+}
+
 /** Entries are fetched from Rust one at a time, as the book asks for them. */
 function makeLoader(/** @type {{name: string, size: number}[]} */ entries) {
   const sizes = new Map(entries.map((e) => [e.name, e.size]));
@@ -115,13 +135,47 @@ function keyFor(/** @type {any} */ book, /** @type {string} */ path) {
 
 // ---- Font size
 
-/** The book's own root size for each page, before any step is applied. */
 const baseSizes = new WeakMap();
+
+// Many books give their text a fixed size: small, medium, large, 12pt, 16px. A fixed size ignores the
+// root size that Ctrl + and Ctrl - change, so such a book would not respond. Each fixed font size in
+// a page's styles is rewritten once as the same size in rem, which follows the root.
+const KEYWORD_PX = { 'xx-small': 9, 'x-small': 10, small: 13, medium: 16, large: 18, 'x-large': 24, 'xx-large': 32, 'xxx-large': 48 };
+const UNIT_PX = { px: 1, pt: 4 / 3, pc: 16, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, q: 96 / 101.6 };
+const sizesRelative = new WeakSet();
+
+function remFor(/** @type {string} */ value, /** @type {number} */ base) {
+  const v = value.trim().toLowerCase();
+  const unit = /^(\d*\.?\d+)(px|pt|pc|in|cm|mm|q)$/.exec(v);
+  const px = v in KEYWORD_PX ? KEYWORD_PX[v] : unit ? parseFloat(unit[1]) * UNIT_PX[unit[2]] : null;
+  return px === null ? null : `${+(px / base).toFixed(4)}rem`;
+}
+
+function makeSizesRelative(/** @type {Document} */ doc, /** @type {number} */ base) {
+  if (sizesRelative.has(doc)) return;
+  sizesRelative.add(doc);
+  const fix = (/** @type {CSSStyleDeclaration} */ style) => {
+    const rem = remFor(style.getPropertyValue('font-size'), base);
+    if (rem) style.setProperty('font-size', rem, style.getPropertyPriority('font-size'));
+  };
+  const walk = (/** @type {CSSRuleList} */ rules) => {
+    for (const rule of /** @type {any[]} */ ([...rules])) {
+      if (rule.style) fix(rule.style);
+      if (rule.cssRules) walk(rule.cssRules);
+      try { if (rule.styleSheet) walk(rule.styleSheet.cssRules); } catch {}
+    }
+  };
+  for (const sheet of [...doc.styleSheets]) {
+    try { walk(sheet.cssRules); } catch {}
+  }
+  for (const el of /** @type {NodeListOf<HTMLElement>} */ (doc.querySelectorAll('[style*="font-size"]'))) fix(el.style);
+}
 
 function applyFont(/** @type {Document} */ doc) {
   const root = doc.documentElement;
   if (!root || !doc.defaultView) return;
   if (!baseSizes.has(doc)) baseSizes.set(doc, parseFloat(doc.defaultView.getComputedStyle(root).fontSize) || 16);
+  makeSizesRelative(doc, baseSizes.get(doc));
   const size = baseSizes.get(doc) * FONT_STEP_FACTOR ** settings.font_step;
   root.style.setProperty('font-size', `${size}px`, 'important');
 }
@@ -1349,7 +1403,12 @@ async function showBook() {
     if (e.detail.isScript) e.detail.allow = false;
   });
   book.transformTarget?.addEventListener('data', (/** @type {any} */ e) => {
-    if (PAGE_TYPES.includes(e.detail.type)) e.detail.data = Promise.resolve(e.detail.data).then(blockScripts);
+    const type = e.detail.type;
+    if (PAGE_TYPES.includes(type)) {
+      e.detail.data = Promise.resolve(e.detail.data).then(blockScripts).then((html) => dropSelectionStyles(html, type));
+    } else if (type === 'text/css') {
+      e.detail.data = Promise.resolve(e.detail.data).then((css) => dropSelectionStyles(css, type));
+    }
   });
 
   const [saved] = await Promise.all([
@@ -1405,6 +1464,7 @@ async function showBook() {
   });
   readingEl.append(view);
   await view.open(book);
+  view.renderer.setStyles?.('::selection { background: #F7C7CE !important; }');
   shownTwoUp = wantTwo();
   applyLayout();
   try {
